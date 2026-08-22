@@ -414,6 +414,16 @@ class NotebookLMMCPServer {
           ...(STRUCTURED_CONTENT_TOOLS.has(name) && isSuccessResult
             ? { structuredContent: result as Record<string, unknown> }
             : {}),
+          // The SDK's client-side validator requires EITHER structuredContent
+          // present OR the result marked isError:true whenever the tool
+          // declares an outputSchema. Our failure results only encode
+          // failure inside the JSON text (success:false) and never set the
+          // protocol-level isError field, which trips
+          // "Tool X has an output schema but did not return structured
+          // content" in SDK-based clients. Scoped to the same 5
+          // outputSchema-declaring tools — not a blanket error-signalling
+          // change for the other 19 tools.
+          ...(STRUCTURED_CONTENT_TOOLS.has(name) && !isSuccessResult ? { isError: true } : {}),
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
