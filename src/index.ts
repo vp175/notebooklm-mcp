@@ -35,6 +35,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
+import type { ProgressCallback } from "./types.js";
 import { AuthManager } from "./auth/auth-manager.js";
 import { applyAccountToConfig, getRequestedAccount } from "./auth/account-switcher.js";
 import { SessionManager } from "./session/session-manager.js";
@@ -147,6 +148,10 @@ class NotebookLMMCPServer {
   private resourceHandlers: ResourceHandlers;
   private settingsManager: SettingsManager;
   private toolDefinitions: Tool[];
+  private toolDispatch: Map<
+    string,
+    (args: Record<string, unknown> | undefined, sendProgress: ProgressCallback) => Promise<unknown>
+  >;
 
   constructor() {
     // Initialize MCP Server
@@ -187,6 +192,7 @@ class NotebookLMMCPServer {
     // Initialize handlers
     this.toolHandlers = new ToolHandlers(this.sessionManager, this.authManager, this.library);
     this.resourceHandlers = new ResourceHandlers(this.library);
+    this.toolDispatch = this.buildToolDispatch();
 
     // Build and Filter tool definitions
     const allTools = buildToolDefinitions(this.library) as Tool[];
@@ -202,6 +208,46 @@ class NotebookLMMCPServer {
     log.info(`  Node: ${process.version}`);
     log.info(`  Platform: ${process.platform}`);
     log.info(`  Profile: ${activeSettings.profile} (${this.toolDefinitions.length} tools active)`);
+  }
+
+  /**
+   * Build the tool-name → handler dispatch table used by the
+   * `CallToolRequestSchema` handler. A direct 1:1 transcription of every
+   * tool case previously handled by a `switch` statement — no new logic.
+   * `Parameters<typeof h.handleX>[0]` derives each handler's argument type
+   * from its own declaration in `handlers.ts`, so it cannot silently drift
+   * out of sync with the handler signatures.
+   */
+  private buildToolDispatch(): Map<
+    string,
+    (args: Record<string, unknown> | undefined, sendProgress: ProgressCallback) => Promise<unknown>
+  > {
+    const h = this.toolHandlers;
+    return new Map<
+      string,
+      (args: Record<string, unknown> | undefined, sendProgress: ProgressCallback) => Promise<unknown>
+    >([
+      ["ask_question", (args, sendProgress) => h.handleAskQuestion(args as Parameters<typeof h.handleAskQuestion>[0], sendProgress)],
+      ["add_notebook", (args) => h.handleAddNotebook(args as unknown as Parameters<typeof h.handleAddNotebook>[0])],
+      ["list_notebooks", () => h.handleListNotebooks()],
+      ["get_notebook", (args) => h.handleGetNotebook(args as Parameters<typeof h.handleGetNotebook>[0])],
+      ["select_notebook", (args) => h.handleSelectNotebook(args as Parameters<typeof h.handleSelectNotebook>[0])],
+      ["update_notebook", (args) => h.handleUpdateNotebook(args as unknown as Parameters<typeof h.handleUpdateNotebook>[0])],
+      ["remove_notebook", (args) => h.handleRemoveNotebook(args as Parameters<typeof h.handleRemoveNotebook>[0])],
+      ["search_notebooks", (args) => h.handleSearchNotebooks(args as Parameters<typeof h.handleSearchNotebooks>[0])],
+      ["get_library_stats", () => h.handleGetLibraryStats()],
+      ["list_sessions", () => h.handleListSessions()],
+      ["close_session", (args) => h.handleCloseSession(args as Parameters<typeof h.handleCloseSession>[0])],
+      ["reset_session", (args) => h.handleResetSession(args as Parameters<typeof h.handleResetSession>[0])],
+      ["get_health", () => h.handleGetHealth()],
+      ["setup_auth", (args, sendProgress) => h.handleSetupAuth(args as Parameters<typeof h.handleSetupAuth>[0], sendProgress)],
+      ["re_auth", (args, sendProgress) => h.handleReAuth(args as Parameters<typeof h.handleReAuth>[0], sendProgress)],
+      ["cleanup_data", (args) => h.handleCleanupData(args as Parameters<typeof h.handleCleanupData>[0])],
+      ["add_source", (args) => h.handleAddSource(args as Parameters<typeof h.handleAddSource>[0])],
+      ["generate_audio", (args) => h.handleGenerateAudio(args as Parameters<typeof h.handleGenerateAudio>[0])],
+      ["get_audio_status", (args) => h.handleGetAudioStatus(args as Parameters<typeof h.handleGetAudioStatus>[0])],
+      ["download_audio", (args) => h.handleDownloadAudio(args as Parameters<typeof h.handleDownloadAudio>[0])],
+    ]);
   }
 
   /**
@@ -246,178 +292,16 @@ class NotebookLMMCPServer {
       };
 
       try {
-        let result;
-
-        switch (name) {
-          case "ask_question":
-            result = await this.toolHandlers.handleAskQuestion(
-              args as {
-                question: string;
-                session_id?: string;
-                notebook_id?: string;
-                notebook_url?: string;
-                show_browser?: boolean;
-                source_format?: "none" | "inline" | "footnotes" | "json";
-              },
-              sendProgress
-            );
-            break;
-
-          case "add_notebook":
-            result = await this.toolHandlers.handleAddNotebook(
-              args as {
-                url: string;
-                name: string;
-                description: string;
-                topics: string[];
-                content_types?: string[];
-                use_cases?: string[];
-                tags?: string[];
-              }
-            );
-            break;
-
-          case "list_notebooks":
-            result = await this.toolHandlers.handleListNotebooks();
-            break;
-
-          case "get_notebook":
-            result = await this.toolHandlers.handleGetNotebook(args as { id: string });
-            break;
-
-          case "select_notebook":
-            result = await this.toolHandlers.handleSelectNotebook(args as { id: string });
-            break;
-
-          case "update_notebook":
-            result = await this.toolHandlers.handleUpdateNotebook(
-              args as {
-                id: string;
-                name?: string;
-                description?: string;
-                topics?: string[];
-                content_types?: string[];
-                use_cases?: string[];
-                tags?: string[];
-                url?: string;
-              }
-            );
-            break;
-
-          case "remove_notebook":
-            result = await this.toolHandlers.handleRemoveNotebook(args as { id: string });
-            break;
-
-          case "search_notebooks":
-            result = await this.toolHandlers.handleSearchNotebooks(args as { query: string });
-            break;
-
-          case "get_library_stats":
-            result = await this.toolHandlers.handleGetLibraryStats();
-            break;
-
-          case "list_sessions":
-            result = await this.toolHandlers.handleListSessions();
-            break;
-
-          case "close_session":
-            result = await this.toolHandlers.handleCloseSession(args as { session_id: string });
-            break;
-
-          case "reset_session":
-            result = await this.toolHandlers.handleResetSession(args as { session_id: string });
-            break;
-
-          case "get_health":
-            result = await this.toolHandlers.handleGetHealth();
-            break;
-
-          case "setup_auth":
-            result = await this.toolHandlers.handleSetupAuth(
-              args as { show_browser?: boolean },
-              sendProgress
-            );
-            break;
-
-          case "re_auth":
-            result = await this.toolHandlers.handleReAuth(
-              args as { show_browser?: boolean },
-              sendProgress
-            );
-            break;
-
-          case "cleanup_data":
-            result = await this.toolHandlers.handleCleanupData(args as { confirm: boolean });
-            break;
-
-          case "add_source":
-            result = await this.toolHandlers.handleAddSource(
-              args as {
-                type: "url" | "text";
-                content: string;
-                title?: string;
-                session_id?: string;
-                notebook_id?: string;
-                notebook_url?: string;
-              }
-            );
-            break;
-
-          case "generate_audio":
-            result = await this.toolHandlers.handleGenerateAudio(
-              args as {
-                custom_prompt?: string;
-                timeout_ms?: number;
-                wait_for_completion?: boolean;
-                session_id?: string;
-                notebook_id?: string;
-                notebook_url?: string;
-                show_browser?: boolean;
-              }
-            );
-            break;
-
-          case "get_audio_status":
-            result = await this.toolHandlers.handleGetAudioStatus(
-              args as {
-                session_id?: string;
-                notebook_id?: string;
-                notebook_url?: string;
-                show_browser?: boolean;
-              }
-            );
-            break;
-
-          case "download_audio":
-            result = await this.toolHandlers.handleDownloadAudio(
-              args as {
-                destination_dir: string;
-                session_id?: string;
-                notebook_id?: string;
-                notebook_url?: string;
-                show_browser?: boolean;
-              }
-            );
-            break;
-
-          default:
-            log.error(`❌ [MCP] Unknown tool: ${name}`);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(
-                    {
-                      success: false,
-                      error: `Unknown tool: ${name}`,
-                    },
-                    null,
-                    2
-                  ),
-                },
-              ],
-            };
+        const handler = this.toolDispatch.get(name);
+        if (!handler) {
+          log.error(`❌ [MCP] Unknown tool: ${name}`);
+          return {
+            content: [
+              { type: "text", text: JSON.stringify({ success: false, error: `Unknown tool: ${name}` }, null, 2) },
+            ],
+          };
         }
+        const result = await handler(args, sendProgress);
 
         // Return result
         return {
