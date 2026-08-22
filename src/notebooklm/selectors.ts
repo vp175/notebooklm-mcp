@@ -237,6 +237,32 @@ export const Selectors = {
 
   studio: {
     /**
+     * Tile-scoping icon anchor for Audio Overview specifically, intended to
+     * filter `artifact-library-item` down to audio's own tile instead of
+     * matching the first/any artifact once more Studio output types exist
+     * (Phase 2).
+     *
+     * HYPOTHESIS, NOT LIVE-VERIFIED (Task 6, 2026-08-22): no authenticated
+     * NotebookLM account was available this session (`get_health` reports
+     * `authenticated: false` on both this fork and the live-connected
+     * server — see docs/superpowers/plans/2026-08-22-full-feature-protocol-
+     * upgrade.md "Execution Note"), so the planned live-DOM reconnaissance
+     * (does the completed tile redisplay its trigger's `audio_magic_eraser`
+     * icon as a badge?) could not run. This selector assumes it does,
+     * grounded only in this file's own documented anchor-priority
+     * convention (Material-Symbols icon names are the most stable,
+     * language-agnostic anchor — see file header). It is used ONLY as the
+     * first candidate in a fallback chain (see `audioPlayer` and
+     * `audioMoreMenuButton` below) that keeps every previously-working
+     * broad selector as a trailing fallback, so a wrong guess here cannot
+     * regress current behavior. Today audio is the only registered Studio
+     * output, so the broad fallback still governs in practice — this
+     * anchor only starts mattering once a second output type is
+     * registered. Re-verify against the live site and remove this comment
+     * once confirmed either way.
+     */
+    audioTileIconAnchor: 'mat-icon:text-is("audio_magic_eraser")',
+    /**
      * "Audio Overview" entry control. As of the 2026-05 Studio layout this
      * is a `<div role="button">` with a Material-Symbols `audio_magic_eraser`
      * icon, NOT a real `<button>`. Icon-anchored selectors fire first.
@@ -260,6 +286,22 @@ export const Selectors = {
       'button[aria-label*="audio overview" i]',
       'button[aria-label*="audio-zusammenfassung" i]',
       'button[aria-label*="podcast" i]',
+    ],
+    /**
+     * Per-card "Customise"/"Anpassen" button that opens the sub-dialog for
+     * supplying a focus prompt before generation. Moved here verbatim from
+     * `audio.ts`'s formerly-inlined `openAudioCustomiseDialog` selector
+     * array (Task 6) so `selectors.ts` remains the single source of truth
+     * for all Studio selectors, per this file's own convention.
+     */
+    audioCustomiseButton: [
+      'button[aria-label*="audio-zusammenfassung anpassen" i]',
+      'button[aria-label*="audio" i][aria-label*="anpassen" i]',
+      'button[aria-label*="customise audio" i]',
+      'button[aria-label*="customize audio" i]',
+      'button[aria-label*="personnaliser" i][aria-label*="audio" i]',
+      'button[aria-label*="personalizar" i][aria-label*="audio" i]',
+      'button[aria-label*="personalizza" i][aria-label*="audio" i]',
     ],
     /**
      * Generate / Generieren / Générer trigger inside the customise dialog.
@@ -302,6 +344,14 @@ export const Selectors = {
      * ready" signal because it only mounts after generation completes.
      */
     audioPlayer: [
+      // Tile-scoped icon anchor (Task 6) — see `audioTileIconAnchor` above
+      // for the hypothesis/fallback reasoning. Tried FIRST but not
+      // load-bearing today: the broad selectors below are kept verbatim as
+      // fallback, so this array's observable behavior is unchanged from
+      // pre-Task-6 unless/until this narrower candidate actually matches
+      // something the broad ones wouldn't have.
+      'artifact-library-item:has(mat-icon:text-is("audio_magic_eraser")):has(button.artifact-action-button)',
+      // Broad selectors (pre-Task-6, still the governing match today).
       "artifact-library-item:has(button.artifact-action-button)",
       ".artifact-library-container artifact-library-item",
       // Legacy <audio> tag for older builds.
@@ -313,7 +363,13 @@ export const Selectors = {
      * contains the Download item.
      */
     audioMoreMenuButton: [
-      "artifact-library-item button:has(mat-icon:text-is(\"more_vert\"))",
+      // Tile-scoped icon anchor (Task 6) — same hypothesis/fallback
+      // reasoning as `audioPlayer` above: tried first, but the broad
+      // selectors below are kept verbatim as fallback so behavior cannot
+      // regress if this narrower candidate never matches anything real.
+      'artifact-library-item:has(mat-icon:text-is("audio_magic_eraser")) button:has(mat-icon:text-is("more_vert"))',
+      // Broad selectors (pre-Task-6, still the governing match today).
+      'artifact-library-item button:has(mat-icon:text-is("more_vert"))',
       'artifact-library-item button[aria-label*="mehr" i]',
       'artifact-library-item button[aria-label*="more" i]',
       'artifact-library-item button[aria-label*="plus" i]',
