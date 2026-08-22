@@ -47,6 +47,7 @@ import { CliHandler } from "./utils/cli-handler.js";
 import { CONFIG, ensureDirectories } from "./config.js";
 import { startHttpTransport } from "./transport/http.js";
 import { log } from "./utils/logger.js";
+import { ElicitationRequestError } from "./errors.js";
 
 /**
  * Server-level instructions consumed by MCP clients during initialization.
@@ -195,16 +196,29 @@ class NotebookLMMCPServer {
     // ToolHandlers is always defined — but it internally gates on the
     // client's *declared* capability (checked at call time, since capabilities
     // are only known after the initialize handshake, which happens after this
-    // constructor runs) and swallows any request failure. Either case
-    // resolves to `undefined`, which handlers.ts treats as "elicitation
-    // unusable — fall through to pre-elicitation behavior", never as a
-    // decline. This matters because the SDK's `elicitInput` does NOT reject
-    // synchronously for an unsupported capability by default (only when
-    // `enforceStrictCapabilities: true` is set, which this server does not
-    // set) — it sends the request over the transport and lets the client's
-    // response (or lack of a handler) determine the outcome, which for a
-    // non-elicitation client is a rejected promise we must not let escape
-    // as a crashed tool call.
+    // constructor runs). The two failure modes below are deliberately kept
+    // distinguishable rather than both collapsing to `undefined`:
+    //
+    //   1. Capability not declared at all → resolves to `undefined`. This is
+    //      NOT an error: the client never offered elicitation, so handlers.ts
+    //      treats it as "elicitation unusable — fall through to
+    //      pre-elicitation behavior", never as a decline. This matters
+    //      because the SDK's `elicitInput` does NOT reject synchronously for
+    //      an unsupported capability by default (only when
+    //      `enforceStrictCapabilities: true` is set, which this server does
+    //      not set) — it sends the request over the transport and lets the
+    //      client's response (or lack of a handler) determine the outcome,
+    //      which for a non-elicitation client is a rejected promise we must
+    //      not let escape as a crashed tool call.
+    //   2. Capability declared, but the `elicitInput` request itself failed
+    //      (rejected, errored, or — very plausibly, since the SDK's default
+    //      request timeout is 60s and a human reading a confirmation dialog
+    //      can easily take longer — timed out) → throws
+    //      `ElicitationRequestError` instead of swallowing to `undefined`.
+    //      Callers that need fail-closed behavior on a failed confirmation
+    //      (e.g. `remove_notebook`, a destructive tool) must catch this
+    //      specific error type and refuse to proceed rather than treating a
+    //      failed request the same as "capability not declared".
     this.toolHandlers = new ToolHandlers(
       this.sessionManager,
       this.authManager,
@@ -224,12 +238,11 @@ class NotebookLMMCPServer {
             requestedSchema: schema as ElicitRequest["params"]["requestedSchema"],
           });
         } catch (error) {
-          log.warning(
-            `Elicitation request failed, proceeding without confirmation: ${
-              error instanceof Error ? error.message : String(error)
-            }`
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          log.warning(`Elicitation request failed: ${errorMessage}`);
+          throw new ElicitationRequestError(
+            `Elicitation request failed or timed out: ${errorMessage}`
           );
-          return undefined;
         }
       }
     );

@@ -19,7 +19,7 @@ import type { StudioOutputType } from "../notebooklm/studio-outputs.js";
 import { CONFIG, applyBrowserOptions, type BrowserOptions } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { AskQuestionResult, ToolResult, ProgressCallback } from "../types.js";
-import { RateLimitError } from "../errors.js";
+import { RateLimitError, ElicitationRequestError } from "../errors.js";
 import { CleanupManager } from "../utils/cleanup-manager.js";
 import { applyAiMarker, PROVENANCE } from "../utils/disclaimer.js";
 
@@ -40,11 +40,18 @@ function followUpReminderEnabled(): boolean {
 }
 
 /**
- * Result of an elicitation request, or `undefined` when elicitation isn't
- * usable for the current client (capability not declared, or the request
- * itself failed) — callers must treat `undefined` the same as `this.elicit`
- * not existing at all, i.e. fall through to pre-elicitation behavior rather
- * than treating it as a decline.
+ * Result of an elicitation request, or `undefined` when the client never
+ * declared the `elicitation` capability — callers must treat `undefined` the
+ * same as `this.elicit` not existing at all, i.e. fall through to
+ * pre-elicitation behavior rather than treating it as a decline.
+ *
+ * This is distinct from a *failed* request: if the capability WAS declared
+ * but the underlying `elicitInput` call itself rejected or timed out, the
+ * callback throws `ElicitationRequestError` instead of resolving to
+ * `undefined`. A caller that must fail closed when confirmation could not be
+ * obtained (e.g. `remove_notebook`, a destructive tool) needs to catch that
+ * specific error and refuse to proceed — letting it collapse to `undefined`
+ * would silently proceed unconfirmed.
  */
 type ElicitResult = { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> };
 type ElicitCallback = (
@@ -781,13 +788,37 @@ export class ToolHandlers {
       }
 
       if (this.elicit) {
-        const confirmation = await this.elicit(
-          `Remove notebook "${notebook.name}" (${notebook.id}) from your local library? This does not delete the notebook on NotebookLM itself — only the local library entry.`,
-          { type: "object", properties: { confirmed: { type: "boolean" } }, required: ["confirmed"] }
-        );
+        let confirmation: ElicitResult | undefined;
+        try {
+          confirmation = await this.elicit(
+            `Remove notebook "${notebook.name}" (${notebook.id}) from your local library? This does not delete the notebook on NotebookLM itself — only the local library entry.`,
+            {
+              type: "object",
+              properties: { confirmed: { type: "boolean" } },
+              required: ["confirmed"],
+            }
+          );
+        } catch (error) {
+          if (error instanceof ElicitationRequestError) {
+            // Capability WAS declared, but the confirmation request itself
+            // failed or timed out (the human never got to answer). Fail
+            // closed — do NOT fall through to an unconfirmed removal. This is
+            // distinct from the capability-not-declared case below, which
+            // resolves to `undefined` rather than throwing and legitimately
+            // proceeds unconfirmed.
+            log.warning(
+              `  ⚠️  [TOOL] remove_notebook: confirmation request failed/timed out — not removing`
+            );
+            return {
+              success: false,
+              error: `Could not confirm removal: the confirmation request failed or timed out before receiving a response. Notebook "${notebook.name}" (${notebook.id}) was NOT removed.`,
+            };
+          }
+          throw error;
+        }
         // `confirmation` is `undefined` when elicitation isn't usable for this
-        // client (capability not declared, or the request failed) — that is
-        // NOT a decline, it means fall through unchanged, exactly as if
+        // client because the capability was never declared — that is NOT a
+        // decline, it means fall through unchanged, exactly as if
         // this.elicit didn't exist.
         if (confirmation && (confirmation.action !== "accept" || confirmation.content?.confirmed !== true)) {
           log.info(`  ℹ️  remove_notebook declined via elicitation`);
