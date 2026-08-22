@@ -21,6 +21,22 @@ import type {
 export class NotebookLibrary {
   private libraryPath: string;
   private library: Library;
+  private changeListeners: Array<() => void> = [];
+
+  /** Register a callback fired after every successful library mutation. */
+  onChange(cb: () => void): void {
+    this.changeListeners.push(cb);
+  }
+
+  private notifyChanged(): void {
+    for (const cb of this.changeListeners) {
+      try {
+        cb();
+      } catch (error) {
+        log.warning(`  ⚠️  Library change listener threw: ${error}`);
+      }
+    }
+  }
 
   constructor() {
     this.libraryPath = path.join(CONFIG.dataDir, "library.json");
@@ -106,6 +122,7 @@ export class NotebookLibrary {
       fs.writeFileSync(this.libraryPath, data, "utf-8");
       this.library = library;
       log.success(`  💾 Library saved (${library.notebooks.length} notebooks)`);
+      this.notifyChanged();
     } catch (error) {
       log.error(`  ❌ Failed to save library: ${error}`);
       throw error;

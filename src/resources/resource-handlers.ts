@@ -80,6 +80,15 @@ export class ResourceHandlers {
    * Register all resource handlers to the server
    */
   public registerHandlers(server: Server): void {
+    // Notify subscribed clients whenever the library changes on disk (add,
+    // remove, update, select, or use-count bump — all route through
+    // NotebookLibrary.saveLibrary, which fires this hook).
+    this.library.onChange(() => {
+      void server.sendResourceListChanged().catch((error: unknown) => {
+        log.warning(`⚠️  [MCP] Failed to send resources/list_changed: ${error}`);
+      });
+    });
+
     // List available resources
     server.setRequestHandler(ListResourcesRequestSchema, async () => {
       log.info("📚 [MCP] list_resources request received");
