@@ -11,12 +11,28 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 const sharedNotebookTargeting = {
-  session_id: { type: "string", description: "Reuse an existing browser session by id. See list_sessions." },
-  notebook_id: { type: "string", description: "Library notebook id. Defaults to the active notebook when omitted." },
+  session_id: {
+    type: "string",
+    description: "Reuse an existing browser session by id. See list_sessions.",
+  },
+  notebook_id: {
+    type: "string",
+    description: "Library notebook id. Defaults to the active notebook when omitted.",
+  },
   notebook_url: { type: "string", description: "Direct NotebookLM URL — overrides notebook_id." },
 };
 
-const ALL_TYPES = ["audio", "video", "report", "slides", "infographic", "mindmap", "datatable", "quiz", "flashcards"];
+const ALL_TYPES = [
+  "audio",
+  "video",
+  "report",
+  "slides",
+  "infographic",
+  "mindmap",
+  "datatable",
+  "quiz",
+  "flashcards",
+];
 const FILE_TYPES = ["audio", "video", "report", "slides", "infographic"];
 const STRUCTURED_TYPES = ["mindmap", "datatable", "quiz", "flashcards"];
 
@@ -26,7 +42,7 @@ export const generateStudioOutputTool: Tool = {
     "Trigger generation of any NotebookLM Studio output. **Async by default** " +
     "— returns immediately with status `started`/`in_progress`/`ready`. " +
     "Only `audio` is implemented by this server today; the other 8 types " +
-    "in the enum return a clear \"not yet implemented\" error (Phase 2). " +
+    'in the enum return a clear "not yet implemented" error (Phase 2). ' +
     "Workflow: generate_studio_output → poll " +
     "get_studio_output_status → download_studio_output (file kinds: audio/" +
     "video/report/slides/infographic) or get_studio_output_content " +
@@ -34,17 +50,42 @@ export const generateStudioOutputTool: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      output_type: { type: "string", enum: ALL_TYPES, description: "Which Studio output to generate." },
-      custom_prompt: { type: "string", description: "Optional focus prompt, passed into the Customize dialog before generation." },
-      difficulty: { type: "string", description: "Only used by quiz/flashcards (Phase 2). Ignored by other types." },
-      wait_for_completion: { type: "boolean", description: "If true, block until ready (up to timeout_ms). Default false." },
-      timeout_ms: { type: "number", description: "Only relevant when wait_for_completion=true. Default 600000 (10 min)." },
-      show_browser: { type: "boolean", description: "Show the browser window for debugging. Default: false." },
+      output_type: {
+        type: "string",
+        enum: ALL_TYPES,
+        description: "Which Studio output to generate.",
+      },
+      custom_prompt: {
+        type: "string",
+        description: "Optional focus prompt, passed into the Customize dialog before generation.",
+      },
+      difficulty: {
+        type: "string",
+        description: "Only used by quiz/flashcards (Phase 2). Ignored by other types.",
+      },
+      wait_for_completion: {
+        type: "boolean",
+        description: "If true, block until ready (up to timeout_ms). Default false.",
+      },
+      timeout_ms: {
+        type: "number",
+        description: "Only relevant when wait_for_completion=true. Default 600000 (10 min).",
+      },
+      show_browser: {
+        type: "boolean",
+        description: "Show the browser window for debugging. Default: false.",
+      },
       ...sharedNotebookTargeting,
     },
     required: ["output_type"],
   },
-  annotations: { title: "Generate Studio output", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  annotations: {
+    title: "Generate Studio output",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
 };
 
 export const getStudioOutputStatusTool: Tool = {
@@ -56,8 +97,15 @@ export const getStudioOutputStatusTool: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      output_type: { type: "string", enum: ALL_TYPES, description: "Which Studio output to check." },
-      show_browser: { type: "boolean", description: "Show the browser window for debugging. Default: false." },
+      output_type: {
+        type: "string",
+        enum: ALL_TYPES,
+        description: "Which Studio output to check.",
+      },
+      show_browser: {
+        type: "boolean",
+        description: "Show the browser window for debugging. Default: false.",
+      },
       ...sharedNotebookTargeting,
     },
     required: ["output_type"],
@@ -101,14 +149,30 @@ export const downloadStudioOutputTool: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      output_type: { type: "string", enum: FILE_TYPES, description: "Which file-kind Studio output to download." },
-      destination_dir: { type: "string", description: "Absolute directory path where the file is saved (created if missing)." },
-      show_browser: { type: "boolean", description: "Show the browser window for debugging. Default: false." },
+      output_type: {
+        type: "string",
+        enum: FILE_TYPES,
+        description: "Which file-kind Studio output to download.",
+      },
+      destination_dir: {
+        type: "string",
+        description: "Absolute directory path where the file is saved (created if missing).",
+      },
+      show_browser: {
+        type: "boolean",
+        description: "Show the browser window for debugging. Default: false.",
+      },
       ...sharedNotebookTargeting,
     },
     required: ["output_type", "destination_dir"],
   },
-  annotations: { title: "Download Studio output", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  annotations: {
+    title: "Download Studio output",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
 };
 
 export const getStudioOutputContentTool: Tool = {
@@ -121,8 +185,15 @@ export const getStudioOutputContentTool: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      output_type: { type: "string", enum: STRUCTURED_TYPES, description: "Which structured-kind Studio output to extract." },
-      show_browser: { type: "boolean", description: "Show the browser window for debugging. Default: false." },
+      output_type: {
+        type: "string",
+        enum: STRUCTURED_TYPES,
+        description: "Which structured-kind Studio output to extract.",
+      },
+      show_browser: {
+        type: "boolean",
+        description: "Show the browser window for debugging. Default: false.",
+      },
       ...sharedNotebookTargeting,
     },
     required: ["output_type"],

@@ -25,7 +25,9 @@ const PROMPTS = [
   },
 ] as const;
 
-function buildPromptMessages(name: string): { role: "user"; content: { type: "text"; text: string } }[] {
+function buildPromptMessages(
+  name: string
+): { role: "user"; content: { type: "text"; text: string } }[] {
   if (name === "notebooklm.auth-setup") {
     return [
       {

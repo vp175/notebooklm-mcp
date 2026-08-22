@@ -376,9 +376,7 @@ class NotebookLMMCPServer {
       [
         "download_studio_output",
         (args) =>
-          h.handleDownloadStudioOutput(
-            args as Parameters<typeof h.handleDownloadStudioOutput>[0]
-          ),
+          h.handleDownloadStudioOutput(args as Parameters<typeof h.handleDownloadStudioOutput>[0]),
       ],
       [
         "get_studio_output_content",

@@ -233,7 +233,9 @@ export class BrowserSession {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       if (/has been closed|Target .* closed|Browser has been closed|Context .* closed/i.test(msg)) {
-        log.warning(`  ♻️  Detected closed page/context during ${label}. Recovering session and retrying...`);
+        log.warning(
+          `  ♻️  Detected closed page/context during ${label}. Recovering session and retrying...`
+        );
         this.initialized = false;
         if (this.page) {
           try {
@@ -532,7 +534,9 @@ export class BrowserSession {
     if (!this.initialized || !this.page || this.isPageClosedSafe()) {
       await this.init();
     }
-    return this.withRecovery("downloadAudio", () => downloadAudioOnPage(this.page!, destinationDir));
+    return this.withRecovery("downloadAudio", () =>
+      downloadAudioOnPage(this.page!, destinationDir)
+    );
   }
 
   /**

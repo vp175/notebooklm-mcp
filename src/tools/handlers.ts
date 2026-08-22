@@ -821,7 +821,10 @@ export class ToolHandlers {
         // client because the capability was never declared — that is NOT a
         // decline, it means fall through unchanged, exactly as if
         // this.elicit didn't exist.
-        if (confirmation && (confirmation.action !== "accept" || confirmation.content?.confirmed !== true)) {
+        if (
+          confirmation &&
+          (confirmation.action !== "accept" || confirmation.content?.confirmed !== true)
+        ) {
           log.info(`  ℹ️  remove_notebook declined via elicitation`);
           return { success: false, error: "Removal declined by user." };
         }
@@ -959,7 +962,11 @@ export class ToolHandlers {
             confirmation = await this.elicit(
               `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)} ` +
                 `(auth state, browser profile, and optionally the notebook library)? This cannot be undone.`,
-              { type: "object", properties: { confirmed: { type: "boolean" } }, required: ["confirmed"] }
+              {
+                type: "object",
+                properties: { confirmed: { type: "boolean" } },
+                required: ["confirmed"],
+              }
             );
           } catch (error) {
             // Capability WAS declared, but the confirmation request itself
@@ -981,7 +988,11 @@ export class ToolHandlers {
           // `confirmation` is `undefined` when elicitation isn't usable for
           // this client — fall through to the preview-only return below,
           // exactly as if this.elicit didn't exist.
-          if (confirmation && confirmation.action === "accept" && confirmation.content?.confirmed === true) {
+          if (
+            confirmation &&
+            confirmation.action === "accept" &&
+            confirmation.content?.confirmed === true
+          ) {
             const result = await cleanupManager.performCleanup(mode, preserve_library);
             log.success(
               `✅ [TOOL] cleanup_data completed via elicitation - deleted ${result.deletedPaths.length} items`
@@ -1163,9 +1174,7 @@ export class ToolHandlers {
       // `started` and `in_progress` count as success — the generation is on
       // its way; the caller polls `get_audio_status` for completion.
       const ok =
-        result.status === "ready" ||
-        result.status === "started" ||
-        result.status === "in_progress";
+        result.status === "ready" || result.status === "started" || result.status === "in_progress";
       return { success: ok, data: { result } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -1283,9 +1292,7 @@ export class ToolHandlers {
         waitForCompletion: args.wait_for_completion ?? false,
       });
       const ok =
-        result.status === "ready" ||
-        result.status === "started" ||
-        result.status === "in_progress";
+        result.status === "ready" || result.status === "started" || result.status === "in_progress";
       return { success: ok, data: { result } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
