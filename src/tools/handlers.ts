@@ -40,6 +40,19 @@ function followUpReminderEnabled(): boolean {
 }
 
 /**
+ * Result of an elicitation request, or `undefined` when elicitation isn't
+ * usable for the current client (capability not declared, or the request
+ * itself failed) — callers must treat `undefined` the same as `this.elicit`
+ * not existing at all, i.e. fall through to pre-elicitation behavior rather
+ * than treating it as a decline.
+ */
+type ElicitResult = { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> };
+type ElicitCallback = (
+  message: string,
+  schema: Record<string, unknown>
+) => Promise<ElicitResult | undefined>;
+
+/**
  * MCP Tool Handlers
  */
 export class ToolHandlers {
@@ -47,7 +60,12 @@ export class ToolHandlers {
   private authManager: AuthManager;
   private library: NotebookLibrary;
 
-  constructor(sessionManager: SessionManager, authManager: AuthManager, library: NotebookLibrary) {
+  constructor(
+    sessionManager: SessionManager,
+    authManager: AuthManager,
+    library: NotebookLibrary,
+    private readonly elicit?: ElicitCallback
+  ) {
     this.sessionManager = sessionManager;
     this.authManager = authManager;
     this.library = library;
@@ -762,6 +780,21 @@ export class ToolHandlers {
         };
       }
 
+      if (this.elicit) {
+        const confirmation = await this.elicit(
+          `Remove notebook "${notebook.name}" (${notebook.id}) from your local library? This does not delete the notebook on NotebookLM itself — only the local library entry.`,
+          { type: "object", properties: { confirmed: { type: "boolean" } }, required: ["confirmed"] }
+        );
+        // `confirmation` is `undefined` when elicitation isn't usable for this
+        // client (capability not declared, or the request failed) — that is
+        // NOT a decline, it means fall through unchanged, exactly as if
+        // this.elicit didn't exist.
+        if (confirmation && (confirmation.action !== "accept" || confirmation.content?.confirmed !== true)) {
+          log.info(`  ℹ️  remove_notebook declined via elicitation`);
+          return { success: false, error: "Removal declined by user." };
+        }
+      }
+
       const removed = this.library.removeNotebook(args.id);
       if (removed) {
         const closedSessions = await this.sessionManager.closeSessionsForNotebook(notebook.url);
@@ -887,6 +920,39 @@ export class ToolHandlers {
           `  Found ${preview.totalPaths.length} items (${cleanupManager.formatBytes(preview.totalSizeBytes)})`
         );
         log.info(`  Platform: ${platformInfo.platform}`);
+
+        if (this.elicit) {
+          const confirmation = await this.elicit(
+            `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)} ` +
+              `(auth state, browser profile, and optionally the notebook library)? This cannot be undone.`,
+            { type: "object", properties: { confirmed: { type: "boolean" } }, required: ["confirmed"] }
+          );
+          // `confirmation` is `undefined` when elicitation isn't usable for
+          // this client — fall through to the preview-only return below,
+          // exactly as if this.elicit didn't exist.
+          if (confirmation && confirmation.action === "accept" && confirmation.content?.confirmed === true) {
+            const result = await cleanupManager.performCleanup(mode, preserve_library);
+            log.success(
+              `✅ [TOOL] cleanup_data completed via elicitation - deleted ${result.deletedPaths.length} items`
+            );
+            return {
+              success: result.success,
+              data: {
+                status: result.success ? "completed" : "partial",
+                mode,
+                result: {
+                  deletedPaths: result.deletedPaths,
+                  failedPaths: result.failedPaths,
+                  totalSizeBytes: result.totalSizeBytes,
+                  categorySummary: result.categorySummary,
+                },
+              },
+            };
+          }
+          if (confirmation) {
+            log.info(`  ℹ️  cleanup_data declined via elicitation — returning preview only`);
+          }
+        }
 
         return {
           success: true,

@@ -32,7 +32,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool, ElicitRequest } from "@modelcontextprotocol/sdk/types.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import type { ProgressCallback } from "./types.js";
@@ -190,7 +190,49 @@ class NotebookLMMCPServer {
     this.settingsManager = new SettingsManager();
 
     // Initialize handlers
-    this.toolHandlers = new ToolHandlers(this.sessionManager, this.authManager, this.library);
+    //
+    // The elicit callback is wired unconditionally — `this.elicit` inside
+    // ToolHandlers is always defined — but it internally gates on the
+    // client's *declared* capability (checked at call time, since capabilities
+    // are only known after the initialize handshake, which happens after this
+    // constructor runs) and swallows any request failure. Either case
+    // resolves to `undefined`, which handlers.ts treats as "elicitation
+    // unusable — fall through to pre-elicitation behavior", never as a
+    // decline. This matters because the SDK's `elicitInput` does NOT reject
+    // synchronously for an unsupported capability by default (only when
+    // `enforceStrictCapabilities: true` is set, which this server does not
+    // set) — it sends the request over the transport and lets the client's
+    // response (or lack of a handler) determine the outcome, which for a
+    // non-elicitation client is a rejected promise we must not let escape
+    // as a crashed tool call.
+    this.toolHandlers = new ToolHandlers(
+      this.sessionManager,
+      this.authManager,
+      this.library,
+      async (message, schema) => {
+        if (!this.server.getClientCapabilities()?.elicitation) {
+          return undefined;
+        }
+        try {
+          // Callers (handlers.ts) build these schema literals inline as
+          // `Record<string, unknown>` and are not coupled to the SDK's exact
+          // (discriminated-union) requestedSchema type — the handlers only
+          // ever pass a valid `{ type: "object", properties, required }`
+          // shape, so this cast is safe.
+          return await this.server.elicitInput({
+            message,
+            requestedSchema: schema as ElicitRequest["params"]["requestedSchema"],
+          });
+        } catch (error) {
+          log.warning(
+            `Elicitation request failed, proceeding without confirmation: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          return undefined;
+        }
+      }
+    );
     this.resourceHandlers = new ResourceHandlers(this.library);
     this.toolDispatch = this.buildToolDispatch();
 
