@@ -162,9 +162,16 @@ export const systemTools: Tool[] = [
       "(Linux/macOS/Windows). Always close all Chrome/Chromium instances " +
       "first — open browsers can lock files.\n\n" +
       "Phase 1 (preview): call with `confirm: false`. Returns a categorised " +
-      "list of paths and total size. **No deletion happens.**\n" +
+      "list of paths and total size. **With a client that does NOT support " +
+      "elicitation, this is preview-only — no deletion happens.** " +
+      "**With an elicitation-capable client, `confirm: false` also triggers " +
+      "a confirmation prompt on the client side: declining it (or the " +
+      "request failing/timing out) still results in preview-only, but " +
+      "ACCEPTING it performs the deletion immediately — even though " +
+      "`confirm` was passed as `false`.**\n" +
       "Phase 2 (delete): after the user reviews the preview and approves, " +
-      "call with `confirm: true`.\n\n" +
+      "call with `confirm: true`. This always deletes, with no elicitation " +
+      "step.\n\n" +
       "Set `preserve_library: true` to keep the notebook library file " +
       "(library.json) while wiping everything else — recommended when " +
       "troubleshooting auth.\n\n" +
@@ -178,8 +185,10 @@ export const systemTools: Tool[] = [
         confirm: {
           type: "boolean",
           description:
-            "false = preview only (default). true = actually delete after " +
-            "user reviewed the preview.",
+            "false (default) = preview only for a client without " +
+            "elicitation; for an elicitation-capable client, accepting the " +
+            "resulting confirmation prompt deletes immediately regardless " +
+            "of this being false. true = always deletes, no elicitation.",
         },
         preserve_library: {
           type: "boolean",

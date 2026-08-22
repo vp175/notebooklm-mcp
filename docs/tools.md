@@ -558,12 +558,17 @@ Categorised preview + delete of every NotebookLM MCP file the server can find on
 
 | Name | Type | Required | Notes |
 |---|---|---|---|
-| `confirm` | bool | yes | `false` = preview only. `true` = delete after preview was reviewed. |
+| `confirm` | bool | yes | See below — `false` is not always preview-only. `true` = always delete, no elicitation. |
 | `preserve_library` | bool | no | Keep `library.json` while wiping everything else. Default `false`. |
+
+`confirm: false` behavior depends on the connected client's capabilities:
+
+- **Client without elicitation support:** `confirm: false` is preview-only — no deletion happens.
+- **Elicitation-capable client:** `confirm: false` still returns the preview, but first triggers a client-side confirmation prompt. Declining that prompt (or the request failing/timing out) also results in preview-only, no deletion. **Accepting the prompt performs the deletion immediately, even though `confirm` was passed as `false`.**
 
 Workflow:
 
-1. `cleanup_data({ confirm: false, preserve_library: true })` — see what will be deleted.
+1. `cleanup_data({ confirm: false, preserve_library: true })` — see what will be deleted. (With an elicitation-capable client, accepting the confirmation prompt here deletes immediately instead of just previewing.)
 2. Close all Chrome instances.
 3. `cleanup_data({ confirm: true, preserve_library: true })` — execute.
 
