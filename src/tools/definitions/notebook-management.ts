@@ -265,6 +265,31 @@ export const notebookManagementTools: Tool[] = [
       type: "object",
       properties: {},
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        success: { type: "boolean" },
+        data: {
+          type: "object",
+          properties: {
+            total_notebooks: { type: "number" },
+            active_notebook: { type: ["string", "null"] },
+            most_used_notebook: { type: ["string", "null"] },
+            total_queries: { type: "number" },
+            last_modified: { type: "string" },
+          },
+          required: [
+            "total_notebooks",
+            "active_notebook",
+            "most_used_notebook",
+            "total_queries",
+            "last_modified",
+          ],
+        },
+        error: { type: "string" },
+      },
+      required: ["success", "data"],
+    },
     annotations: {
       title: "Get library statistics",
       readOnlyHint: true,

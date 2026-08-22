@@ -62,6 +62,32 @@ export const getStudioOutputStatusTool: Tool = {
     },
     required: ["output_type"],
   },
+  outputSchema: {
+    type: "object",
+    properties: {
+      success: { type: "boolean" },
+      data: {
+        type: "object",
+        properties: {
+          result: {
+            type: "object",
+            properties: {
+              status: {
+                type: "string",
+                enum: ["ready", "in_progress", "not_started", "started", "error"],
+              },
+              alreadyExisted: { type: "boolean" },
+              message: { type: "string" },
+            },
+            required: ["status"],
+          },
+        },
+        required: ["result"],
+      },
+      error: { type: "string" },
+    },
+    required: ["success", "data"],
+  },
   annotations: { title: "Get Studio output status", readOnlyHint: true, openWorldHint: true },
 };
 
@@ -100,6 +126,29 @@ export const getStudioOutputContentTool: Tool = {
       ...sharedNotebookTargeting,
     },
     required: ["output_type"],
+  },
+  outputSchema: {
+    type: "object",
+    properties: {
+      success: { type: "boolean" },
+      data: {
+        type: "object",
+        properties: {
+          result: {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              content: {},
+              message: { type: "string" },
+            },
+            required: ["success"],
+          },
+        },
+        required: ["result"],
+      },
+      error: { type: "string" },
+    },
+    required: ["success", "data"],
   },
   annotations: { title: "Get Studio output content", readOnlyHint: true, openWorldHint: true },
 };

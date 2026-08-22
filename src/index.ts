@@ -384,6 +384,25 @@ class NotebookLMMCPServer {
         }
         const result = await handler(args, sendProgress);
 
+        // Tools whose result shape is stable and covered by a declared
+        // `outputSchema` (Task 10) — see each Tool definition for the
+        // matching schema. Kept narrow deliberately: attaching
+        // `structuredContent` to a tool whose result shape isn't pinned
+        // down risks silently drifting out of sync with its outputSchema.
+        const STRUCTURED_CONTENT_TOOLS = new Set([
+          "get_health",
+          "get_library_stats",
+          "list_sessions",
+          "get_studio_output_status",
+          "get_studio_output_content",
+        ]);
+        // Never attach structuredContent to an error result — only the
+        // success shape is covered by the declared outputSchema.
+        const isSuccessResult =
+          typeof result === "object" &&
+          result !== null &&
+          (result as { success?: boolean }).success !== false;
+
         // Return result
         return {
           content: [
@@ -392,6 +411,9 @@ class NotebookLMMCPServer {
               text: JSON.stringify(result, null, 2),
             },
           ],
+          ...(STRUCTURED_CONTENT_TOOLS.has(name) && isSuccessResult
+            ? { structuredContent: result as Record<string, unknown> }
+            : {}),
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
