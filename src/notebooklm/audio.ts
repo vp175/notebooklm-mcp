@@ -27,12 +27,26 @@
  *     `<audio>` element in the DOM.
  *
  * Task 6 (2026-08-22) added a tile-scoped icon-anchor selector as the FIRST
- * candidate in `Selectors.studio.audioPlayer`/`audioMoreMenuButton`, ahead
- * of the broad selectors above — see the "HYPOTHESIS, NOT LIVE-VERIFIED"
- * comment on `Selectors.studio.audioTileIconAnchor` in selectors.ts for why
- * (no authenticated account was available to confirm live DOM markup this
- * session) and why it cannot regress current behavior (broad selectors are
- * kept, unmodified, as trailing fallback entries in the same arrays).
+ * candidate in `Selectors.studio.audioPlayer`/`audioMoreMenuButton` — see the
+ * "HYPOTHESIS, NOT LIVE-VERIFIED" comment on `Selectors.studio.
+ * audioTileIconAnchor` in selectors.ts for why (no authenticated account was
+ * available to confirm live DOM markup this session) and why it cannot
+ * regress current behavior (broad selectors are kept, unmodified, as
+ * trailing fallback entries in the same arrays).
+ *
+ * CORRECTED (Task 6 review, 2026-08-22): "ahead of" only means something for
+ * `audioMoreMenuButton`, which `clickFirstVisible` reads as an ordered loop.
+ * `audioPlayer` is consumed as `readySelectors` — a single comma-joined CSS
+ * OR (`joinAlt` + `.first()` in studio-outputs.ts) — where array position
+ * confers no priority at all. See `Selectors.studio.audioTileIconAnchor` in
+ * selectors.ts for the full correction; the short version: the broad
+ * `readySelectors` entries must be REMOVED, not just out-ordered, before a
+ * second Studio output type can be safely discriminated. The
+ * `inProgressPhrases` story is likewise not tile-scoped in practice —
+ * `isInProgress` (studio-outputs.ts) reads the whole `.studio-panel`
+ * textContent, so any type-agnostic phrase in `GENERATION_IN_PROGRESS_
+ * PHRASES` below matches regardless of which output type is actually
+ * generating.
  */
 
 import type { Page } from "patchright";
@@ -140,11 +154,24 @@ async function downloadAudio(page: Page, destDir: string): Promise<DownloadAudio
 registerStudioStrategy("audio", {
   kind: "file",
   triggerSelectors: Selectors.studio.audioOverviewButton,
+  // NOT tile-scoped in practice: `isInProgress` (studio-outputs.ts) reads
+  // the ENTIRE `.studio-panel` textContent, not this type's own tile/card,
+  // so any type-agnostic phrase here (e.g. "check back in a few minutes")
+  // matches regardless of which output type is actually generating. Once a
+  // second Studio output type is registered (Phase 2), a generating output
+  // of that other type would also make `get_studio_output_status(page,
+  // "audio")` report `in_progress`. Real per-tile scoping needs to be added
+  // to `isInProgress` before that can be trusted.
   inProgressPhrases: GENERATION_IN_PROGRESS_PHRASES,
-  // Fallback chain: tile-scoped icon anchor tried first (Task 6 hypothesis,
-  // not live-verified — see selectors.ts), broad pre-Task-6 selectors kept
-  // as trailing fallback so nothing that worked before this task can have
-  // stopped working. See Selectors.studio.audioPlayer for the full chain.
+  // Fallback chain: tile-scoped icon anchor listed first (Task 6
+  // hypothesis, not live-verified — see selectors.ts), broad pre-Task-6
+  // selectors kept as trailing fallback so nothing that worked before this
+  // task can have stopped working. IMPORTANT: `readySelectors` is consumed
+  // as a single comma-joined CSS OR (`joinAlt` + `.first()`), NOT an
+  // ordered loop — listing the anchor first here does NOT give it priority
+  // over the broad entries below it. See Selectors.studio.audioPlayer /
+  // Selectors.studio.audioTileIconAnchor in selectors.ts for the full
+  // correction and what must change before a second output type registers.
   readySelectors: Selectors.studio.audioPlayer,
   trigger: triggerAudio,
   download: downloadAudio,

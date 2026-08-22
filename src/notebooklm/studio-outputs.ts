@@ -56,9 +56,34 @@ export interface StudioOutputStrategy {
   kind: StudioArtifactKind;
   /** Entry-button selector(s) in the Studio panel, following the Selectors.studio.* convention. */
   triggerSelectors: readonly string[];
-  /** Multilingual "generation in progress" phrase list, scoped to this type's tile/card only. */
+  /**
+   * Multilingual "generation in progress" phrase list. NOT scoped to this
+   * type's tile/card in practice — `isInProgress` below reads the ENTIRE
+   * `.studio-panel` textContent, not a per-tile subset, so a type-agnostic
+   * phrase here (e.g. "check back in a few minutes") matches regardless of
+   * which output type is actually generating. Once a second Studio output
+   * type is registered, a generating output of that other type will also
+   * make `getStudioOutputStatus`/`generateStudioOutput` report
+   * `in_progress` for THIS type. Real per-tile scoping needs to be added to
+   * `isInProgress` before a second concurrent generation can be safely
+   * distinguished — this field alone does not provide that guarantee.
+   */
   inProgressPhrases: readonly string[];
-  /** Selector(s) identifying this type's completed tile specifically (not any artifact tile). */
+  /**
+   * Selector(s) identifying this type's completed tile. NOTE: array
+   * position does NOT confer priority here. `isReady`/`waitUntilReady`
+   * below consume this as a single comma-joined CSS OR selector
+   * (`joinAlt(strategy.readySelectors)` + `.first()`) — `.first()` returns
+   * whichever candidate matches first in DOM order, irrespective of which
+   * array entry produced that match. A narrow, type-specific selector
+   * listed before a broad, type-agnostic one is NOT thereby preferred; the
+   * broad entry can still be what actually matches. To make this list
+   * genuinely discriminate between output types, the broad/type-agnostic
+   * entries must be REMOVED once a second type is registered — not merely
+   * placed after a narrower one — or tile discrimination silently fails.
+   * (Contrast with selector lists consumed via `clickFirstVisible` below,
+   * which IS an ordered loop where position does matter.)
+   */
   readySelectors: readonly string[];
   trigger(page: Page, opts: { customPrompt?: string; difficulty?: string }): Promise<void>;
   download?(page: Page, destDir: string): Promise<DownloadAudioResult>;
