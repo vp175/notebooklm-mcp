@@ -215,6 +215,36 @@ export class BrowserSession {
   }
 
   /**
+   * Runs `fn` once; if it fails with a closed-page/context error, reinitialises
+   * the session and retries `fn` exactly once. Shared by every method that
+   * touches `this.page`, so page/context loss is recovered from consistently
+   * instead of each caller reimplementing the same regex + reinit + retry.
+   */
+  private async withRecovery<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (/has been closed|Target .* closed|Browser has been closed|Context .* closed/i.test(msg)) {
+        log.warning(`  ♻️  Detected closed page/context during ${label}. Recovering session and retrying...`);
+        this.initialized = false;
+        if (this.page) {
+          try {
+            await this.page.close();
+          } catch {
+            /* page already gone */
+          }
+        }
+        this.page = null;
+        await this.init();
+        return await fn();
+      }
+      log.error(`❌ [${this.sessionId}] Failed during ${label}: ${msg}`);
+      throw error;
+    }
+  }
+
+  /**
    * Ensure the session is authenticated, perform auto-login if needed
    */
   private async ensureAuthenticated(): Promise<boolean> {
@@ -453,32 +483,7 @@ export class BrowserSession {
       return answer;
     };
 
-    try {
-      return await askOnce();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (/has been closed|Target .* closed|Browser has been closed|Context .* closed/i.test(msg)) {
-        log.warning(`  ♻️  Detected closed page/context. Recovering session and retrying ask...`);
-        try {
-          this.initialized = false;
-          if (this.page) {
-            try {
-              await this.page.close();
-            } catch {
-              /* page already gone */
-            }
-          }
-          this.page = null;
-          await this.init();
-          return await askOnce();
-        } catch (e2) {
-          log.error(`❌ Recovery failed: ${e2}`);
-          throw e2;
-        }
-      }
-      log.error(`❌ [${this.sessionId}] Failed to ask question: ${msg}`);
-      throw error;
-    }
+    return this.withRecovery("ask", askOnce);
   }
 
   /**
@@ -758,28 +763,7 @@ export class BrowserSession {
       log.success(`✅ [${this.sessionId}] Chat history reset`);
     };
 
-    try {
-      await resetOnce();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (/has been closed|Target .* closed|Browser has been closed|Context .* closed/i.test(msg)) {
-        log.warning(`  ♻️  Detected closed page/context during reset. Recovering and retrying...`);
-        this.initialized = false;
-        if (this.page) {
-          try {
-            await this.page.close();
-          } catch {
-            /* page already gone */
-          }
-        }
-        this.page = null;
-        await this.init();
-        await resetOnce();
-        return;
-      }
-      log.error(`❌ [${this.sessionId}] Failed to reset: ${msg}`);
-      throw error;
-    }
+    await this.withRecovery("reset", resetOnce);
   }
 
   /**
