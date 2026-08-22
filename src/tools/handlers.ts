@@ -953,11 +953,30 @@ export class ToolHandlers {
         log.info(`  Platform: ${platformInfo.platform}`);
 
         if (this.elicit) {
-          const confirmation = await this.elicit(
-            `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)} ` +
-              `(auth state, browser profile, and optionally the notebook library)? This cannot be undone.`,
-            { type: "object", properties: { confirmed: { type: "boolean" } }, required: ["confirmed"] }
-          );
+          let confirmation: ElicitResult | undefined;
+          try {
+            confirmation = await this.elicit(
+              `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)} ` +
+                `(auth state, browser profile, and optionally the notebook library)? This cannot be undone.`,
+              { type: "object", properties: { confirmed: { type: "boolean" } }, required: ["confirmed"] }
+            );
+          } catch (error) {
+            // Capability WAS declared, but the confirmation request itself
+            // failed or timed out (typically `ElicitationRequestError`, but
+            // any thrown error from this call is handled the same way).
+            // Unlike remove_notebook, there is nothing unsafe about falling
+            // through here: this is the preview branch, no deletion has
+            // happened or is about to happen, and `preview` was already
+            // computed above. Treat this exactly like the
+            // capability-not-declared case (`confirmation` stays
+            // `undefined`) and return the normal preview payload rather
+            // than discarding it behind an opaque error.
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            log.warning(
+              `  ⚠️  [TOOL] cleanup_data: confirmation request failed/timed out (${errorMessage}) — returning preview only`
+            );
+            confirmation = undefined;
+          }
           // `confirmation` is `undefined` when elicitation isn't usable for
           // this client — fall through to the preview-only return below,
           // exactly as if this.elicit didn't exist.
