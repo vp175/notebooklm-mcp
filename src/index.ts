@@ -225,28 +225,80 @@ class NotebookLMMCPServer {
     const h = this.toolHandlers;
     return new Map<
       string,
-      (args: Record<string, unknown> | undefined, sendProgress: ProgressCallback) => Promise<unknown>
+      (
+        args: Record<string, unknown> | undefined,
+        sendProgress: ProgressCallback
+      ) => Promise<unknown>
     >([
-      ["ask_question", (args, sendProgress) => h.handleAskQuestion(args as Parameters<typeof h.handleAskQuestion>[0], sendProgress)],
-      ["add_notebook", (args) => h.handleAddNotebook(args as unknown as Parameters<typeof h.handleAddNotebook>[0])],
+      [
+        "ask_question",
+        (args, sendProgress) =>
+          h.handleAskQuestion(args as Parameters<typeof h.handleAskQuestion>[0], sendProgress),
+      ],
+      [
+        "add_notebook",
+        (args) => h.handleAddNotebook(args as unknown as Parameters<typeof h.handleAddNotebook>[0]),
+      ],
       ["list_notebooks", () => h.handleListNotebooks()],
-      ["get_notebook", (args) => h.handleGetNotebook(args as Parameters<typeof h.handleGetNotebook>[0])],
-      ["select_notebook", (args) => h.handleSelectNotebook(args as Parameters<typeof h.handleSelectNotebook>[0])],
-      ["update_notebook", (args) => h.handleUpdateNotebook(args as unknown as Parameters<typeof h.handleUpdateNotebook>[0])],
-      ["remove_notebook", (args) => h.handleRemoveNotebook(args as Parameters<typeof h.handleRemoveNotebook>[0])],
-      ["search_notebooks", (args) => h.handleSearchNotebooks(args as Parameters<typeof h.handleSearchNotebooks>[0])],
+      [
+        "get_notebook",
+        (args) => h.handleGetNotebook(args as Parameters<typeof h.handleGetNotebook>[0]),
+      ],
+      [
+        "select_notebook",
+        (args) => h.handleSelectNotebook(args as Parameters<typeof h.handleSelectNotebook>[0]),
+      ],
+      [
+        "update_notebook",
+        (args) =>
+          h.handleUpdateNotebook(args as unknown as Parameters<typeof h.handleUpdateNotebook>[0]),
+      ],
+      [
+        "remove_notebook",
+        (args) => h.handleRemoveNotebook(args as Parameters<typeof h.handleRemoveNotebook>[0]),
+      ],
+      [
+        "search_notebooks",
+        (args) => h.handleSearchNotebooks(args as Parameters<typeof h.handleSearchNotebooks>[0]),
+      ],
       ["get_library_stats", () => h.handleGetLibraryStats()],
       ["list_sessions", () => h.handleListSessions()],
-      ["close_session", (args) => h.handleCloseSession(args as Parameters<typeof h.handleCloseSession>[0])],
-      ["reset_session", (args) => h.handleResetSession(args as Parameters<typeof h.handleResetSession>[0])],
+      [
+        "close_session",
+        (args) => h.handleCloseSession(args as Parameters<typeof h.handleCloseSession>[0]),
+      ],
+      [
+        "reset_session",
+        (args) => h.handleResetSession(args as Parameters<typeof h.handleResetSession>[0]),
+      ],
       ["get_health", () => h.handleGetHealth()],
-      ["setup_auth", (args, sendProgress) => h.handleSetupAuth(args as Parameters<typeof h.handleSetupAuth>[0], sendProgress)],
-      ["re_auth", (args, sendProgress) => h.handleReAuth(args as Parameters<typeof h.handleReAuth>[0], sendProgress)],
-      ["cleanup_data", (args) => h.handleCleanupData(args as Parameters<typeof h.handleCleanupData>[0])],
+      [
+        "setup_auth",
+        (args, sendProgress) =>
+          h.handleSetupAuth(args as Parameters<typeof h.handleSetupAuth>[0], sendProgress),
+      ],
+      [
+        "re_auth",
+        (args, sendProgress) =>
+          h.handleReAuth(args as Parameters<typeof h.handleReAuth>[0], sendProgress),
+      ],
+      [
+        "cleanup_data",
+        (args) => h.handleCleanupData(args as Parameters<typeof h.handleCleanupData>[0]),
+      ],
       ["add_source", (args) => h.handleAddSource(args as Parameters<typeof h.handleAddSource>[0])],
-      ["generate_audio", (args) => h.handleGenerateAudio(args as Parameters<typeof h.handleGenerateAudio>[0])],
-      ["get_audio_status", (args) => h.handleGetAudioStatus(args as Parameters<typeof h.handleGetAudioStatus>[0])],
-      ["download_audio", (args) => h.handleDownloadAudio(args as Parameters<typeof h.handleDownloadAudio>[0])],
+      [
+        "generate_audio",
+        (args) => h.handleGenerateAudio(args as Parameters<typeof h.handleGenerateAudio>[0]),
+      ],
+      [
+        "get_audio_status",
+        (args) => h.handleGetAudioStatus(args as Parameters<typeof h.handleGetAudioStatus>[0]),
+      ],
+      [
+        "download_audio",
+        (args) => h.handleDownloadAudio(args as Parameters<typeof h.handleDownloadAudio>[0]),
+      ],
     ]);
   }
 
@@ -297,7 +349,10 @@ class NotebookLMMCPServer {
           log.error(`❌ [MCP] Unknown tool: ${name}`);
           return {
             content: [
-              { type: "text", text: JSON.stringify({ success: false, error: `Unknown tool: ${name}` }, null, 2) },
+              {
+                type: "text",
+                text: JSON.stringify({ success: false, error: `Unknown tool: ${name}` }, null, 2),
+              },
             ],
           };
         }
