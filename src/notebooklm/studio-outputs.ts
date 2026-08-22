@@ -110,6 +110,24 @@ function getStrategy(type: StudioOutputType): StudioOutputStrategy {
   return s;
 }
 
+/**
+ * Registry-membership check that does NOT need a `Page`. Lets callers (tool
+ * handlers) reject an unimplemented `output_type` up front — before
+ * `resolveNotebookUrl`/`getOrCreateSession` launch a browser — instead of
+ * only discovering it via `getStrategy()` throwing deep inside a live
+ * session. Without this, an unauthenticated/no-notebook call fails on
+ * "Notebook URL is required" for EVERY type, implemented or not, making the
+ * documented "not yet implemented (Phase 2)" error unreachable in practice.
+ */
+export function isStudioTypeImplemented(type: StudioOutputType): boolean {
+  return STRATEGIES.has(type);
+}
+
+/** Currently-registered Studio output types, for building the same error message pre-session. */
+export function implementedStudioTypes(): StudioOutputType[] {
+  return [...STRATEGIES.keys()];
+}
+
 export async function clickFirstVisible(
   page: Page,
   selectors: readonly string[],

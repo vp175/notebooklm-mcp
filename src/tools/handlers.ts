@@ -16,6 +16,7 @@ import type {
 import type { AddSourceResult } from "../notebooklm/sources.js";
 import type { AudioGenerationResult, DownloadAudioResult } from "../notebooklm/audio.js";
 import type { StudioOutputType } from "../notebooklm/studio-outputs.js";
+import { isStudioTypeImplemented, implementedStudioTypes } from "../notebooklm/studio-outputs.js";
 import { CONFIG, applyBrowserOptions, type BrowserOptions } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { AskQuestionResult, ToolResult, ProgressCallback } from "../types.js";
@@ -1073,6 +1074,22 @@ export class ToolHandlers {
   }
 
   /**
+   * Build the same "not yet implemented (Phase 2)" message `getStrategy()`
+   * throws inside `studio-outputs.ts`, so the four Studio-output handlers can
+   * surface it up front — before `resolveNotebookUrl`/`getOrCreateSession`
+   * launch a browser — instead of only reaching it deep inside a live
+   * session (where an unauthenticated/no-notebook caller would instead see
+   * "Notebook URL is required to create a session" for every type,
+   * implemented or not).
+   */
+  private studioTypeNotImplementedError(type: StudioOutputType): string {
+    return (
+      `Studio output type "${type}" is not yet implemented by this server (Phase 2). ` +
+      `Implemented types: ${implementedStudioTypes().join(", ")}.`
+    );
+  }
+
+  /**
    * Handle add_source tool (issue #25).
    */
   async handleAddSource(args: {
@@ -1242,6 +1259,11 @@ export class ToolHandlers {
     show_browser?: boolean;
   }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
     log.info(`🔧 [TOOL] generate_studio_output called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] generate_studio_output failed: ${error}`);
+      return { success: false, error };
+    }
     const originalConfig = { ...CONFIG };
     if (args.show_browser !== undefined) {
       Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
@@ -1286,6 +1308,11 @@ export class ToolHandlers {
     show_browser?: boolean;
   }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
     log.info(`🔧 [TOOL] get_studio_output_status called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] get_studio_output_status failed: ${error}`);
+      return { success: false, error };
+    }
     const originalConfig = { ...CONFIG };
     if (args.show_browser !== undefined) {
       Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
@@ -1322,6 +1349,11 @@ export class ToolHandlers {
     show_browser?: boolean;
   }): Promise<ToolResult<{ result: DownloadAudioResult }>> {
     log.info(`🔧 [TOOL] download_studio_output called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] download_studio_output failed: ${error}`);
+      return { success: false, error };
+    }
     const originalConfig = { ...CONFIG };
     if (args.show_browser !== undefined) {
       Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
@@ -1357,6 +1389,11 @@ export class ToolHandlers {
     show_browser?: boolean;
   }): Promise<ToolResult<{ result: { success: boolean; content?: unknown; message?: string } }>> {
     log.info(`🔧 [TOOL] get_studio_output_content called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] get_studio_output_content failed: ${error}`);
+      return { success: false, error };
+    }
     const originalConfig = { ...CONFIG };
     if (args.show_browser !== undefined) {
       Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
