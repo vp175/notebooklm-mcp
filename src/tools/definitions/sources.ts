@@ -106,7 +106,13 @@ export const generateAudioTool: Tool = {
     "Pass `wait_for_completion: true` for legacy synchronous behaviour " +
     "(blocks for up to `timeout_ms`). Audio Overview is the only Studio " +
     "output exposed in v2.0 (Video / Mindmap / Quiz / Infographic / " +
-    "Datatable / Presentation are NotebookLM features but not yet wrapped).",
+    "Datatable / Presentation are NotebookLM features but not yet wrapped).\n\n" +
+    "Equivalent to `generate_studio_output` with `output_type: \"audio\"` — " +
+    "kept as a dedicated tool for backward compatibility. Other Studio " +
+    "output types (video, report, slides, infographic, mindmap, datatable, " +
+    "quiz, flashcards) are only available through the generic " +
+    "`generate_studio_output` / `get_studio_output_status` / " +
+    "`download_studio_output` / `get_studio_output_content` tools.",
   inputSchema: {
     type: "object",
     properties: {
@@ -156,7 +162,11 @@ export const getAudioStatusTool: Tool = {
     "  • `not_started` — no Audio Overview exists yet for this notebook\n\n" +
     "Safe to poll every ~30 s while waiting for `generate_audio` to finish. " +
     "When status flips to `ready`, call `download_audio` with a destination " +
-    "directory.",
+    "directory.\n\n" +
+    "Equivalent to `get_studio_output_status` with `output_type: \"audio\"` " +
+    "— kept as a dedicated tool for backward compatibility. New Studio " +
+    "output types are only available through the generic " +
+    "`get_studio_output_status` tool.",
   inputSchema: {
     type: "object",
     properties: {
@@ -183,7 +193,11 @@ export const downloadAudioTool: Tool = {
     "explaining what to do.\n\n" +
     "The file lands in `destination_dir` with NotebookLM's suggested " +
     "filename (sanitised — usually the audio's title with underscores). " +
-    "The full saved path is returned in `result.filePath`.",
+    "The full saved path is returned in `result.filePath`.\n\n" +
+    "Equivalent to `download_studio_output` with `output_type: \"audio\"` — " +
+    "kept as a dedicated tool for backward compatibility. New file-kind " +
+    "Studio output types (video, report, slides, infographic) are only " +
+    "available through the generic `download_studio_output` tool.",
   inputSchema: {
     type: "object",
     properties: {

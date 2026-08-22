@@ -37,6 +37,13 @@ import {
   type AudioGenerationResult,
   type DownloadAudioResult,
 } from "../notebooklm/audio.js";
+import {
+  generateStudioOutput,
+  getStudioOutputStatus,
+  downloadStudioOutput,
+  getStudioOutputContent,
+  type StudioOutputType,
+} from "../notebooklm/studio-outputs.js";
 import { CONFIG } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { SessionInfo, ProgressCallback } from "../types.js";
@@ -526,6 +533,57 @@ export class BrowserSession {
       await this.init();
     }
     return await downloadAudioOnPage(this.page!, destinationDir);
+  }
+
+  /**
+   * Trigger generation of any registered Studio output type (Task 7). Thin
+   * pass-through onto the generic engine, mirroring the `generateAudio`
+   * pattern above but routed through `withRecovery` since this is new code
+   * added after `withRecovery` was extracted (Task 4).
+   */
+  async generateStudioOutput(
+    type: StudioOutputType,
+    options: GenerateAudioOptions & { difficulty?: string } = {}
+  ): Promise<AudioGenerationResult> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("generateStudioOutput", () =>
+      generateStudioOutput(this.page!, type, options)
+    );
+  }
+
+  /**
+   * Non-blocking probe for any registered Studio output type (Task 7).
+   */
+  async getStudioOutputStatus(type: StudioOutputType): Promise<AudioGenerationResult> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("getStudioOutputStatus", () =>
+      getStudioOutputStatus(this.page!, type)
+    );
+  }
+
+  /**
+   * Download a completed file-kind Studio output (Task 7).
+   */
+  async downloadStudioOutput(
+    type: StudioOutputType,
+    destinationDir: string
+  ): Promise<DownloadAudioResult> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("downloadStudioOutput", () =>
+      downloadStudioOutput(this.page!, type, destinationDir)
+    );
+  }
+
+  /**
+   * Extract a completed structured-kind Studio output as JSON (Task 7).
+   */
+  async getStudioOutputContent(
+    type: StudioOutputType
+  ): Promise<{ success: boolean; content?: unknown; message?: string }> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("getStudioOutputContent", () =>
+      getStudioOutputContent(this.page!, type)
+    );
   }
 
   /**

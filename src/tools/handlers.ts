@@ -15,6 +15,7 @@ import type {
 } from "../library/types.js";
 import type { AddSourceResult } from "../notebooklm/sources.js";
 import type { AudioGenerationResult, DownloadAudioResult } from "../notebooklm/audio.js";
+import type { StudioOutputType } from "../notebooklm/studio-outputs.js";
 import { CONFIG, applyBrowserOptions, type BrowserOptions } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { AskQuestionResult, ToolResult, ProgressCallback } from "../types.js";
@@ -1103,6 +1104,160 @@ export class ToolHandlers {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] download_audio failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle generate_studio_output tool (Task 7) — generic trigger for any
+   * registered Studio output type.
+   */
+  async handleGenerateStudioOutput(args: {
+    output_type: StudioOutputType;
+    custom_prompt?: string;
+    difficulty?: string;
+    timeout_ms?: number;
+    wait_for_completion?: boolean;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+    log.info(`🔧 [TOOL] generate_studio_output called (type=${args.output_type})`);
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.generateStudioOutput(args.output_type, {
+        customPrompt: args.custom_prompt,
+        difficulty: args.difficulty,
+        timeoutMs: args.timeout_ms,
+        waitForCompletion: args.wait_for_completion ?? false,
+      });
+      const ok =
+        result.status === "ready" ||
+        result.status === "started" ||
+        result.status === "in_progress";
+      return { success: ok, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] generate_studio_output failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle get_studio_output_status tool (Task 7) — non-blocking poll for
+   * any registered Studio output type.
+   */
+  async handleGetStudioOutputStatus(args: {
+    output_type: StudioOutputType;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+    log.info(`🔧 [TOOL] get_studio_output_status called (type=${args.output_type})`);
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.getStudioOutputStatus(args.output_type);
+      return { success: true, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] get_studio_output_status failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle download_studio_output tool (Task 7) — save a completed
+   * file-kind Studio output to disk.
+   */
+  async handleDownloadStudioOutput(args: {
+    output_type: StudioOutputType;
+    destination_dir: string;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: DownloadAudioResult }>> {
+    log.info(`🔧 [TOOL] download_studio_output called (type=${args.output_type})`);
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.downloadStudioOutput(args.output_type, args.destination_dir);
+      return { success: result.success, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] download_studio_output failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle get_studio_output_content tool (Task 7) — extract a completed
+   * structured-kind Studio output as JSON.
+   */
+  async handleGetStudioOutputContent(args: {
+    output_type: StudioOutputType;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: { success: boolean; content?: unknown; message?: string } }>> {
+    log.info(`🔧 [TOOL] get_studio_output_content called (type=${args.output_type})`);
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.getStudioOutputContent(args.output_type);
+      return { success: result.success, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] get_studio_output_content failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
       Object.assign(CONFIG, originalConfig);

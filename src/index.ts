@@ -299,6 +299,32 @@ class NotebookLMMCPServer {
         "download_audio",
         (args) => h.handleDownloadAudio(args as Parameters<typeof h.handleDownloadAudio>[0]),
       ],
+      [
+        "generate_studio_output",
+        (args) =>
+          h.handleGenerateStudioOutput(args as Parameters<typeof h.handleGenerateStudioOutput>[0]),
+      ],
+      [
+        "get_studio_output_status",
+        (args) =>
+          h.handleGetStudioOutputStatus(
+            args as Parameters<typeof h.handleGetStudioOutputStatus>[0]
+          ),
+      ],
+      [
+        "download_studio_output",
+        (args) =>
+          h.handleDownloadStudioOutput(
+            args as Parameters<typeof h.handleDownloadStudioOutput>[0]
+          ),
+      ],
+      [
+        "get_studio_output_content",
+        (args) =>
+          h.handleGetStudioOutputContent(
+            args as Parameters<typeof h.handleGetStudioOutputContent>[0]
+          ),
+      ],
     ]);
   }
 
