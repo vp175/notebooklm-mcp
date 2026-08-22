@@ -108,11 +108,13 @@ export const generateAudioTool: Tool = {
     "output exposed in v2.0 (Video / Mindmap / Quiz / Infographic / " +
     "Datatable / Presentation are NotebookLM features but not yet wrapped).\n\n" +
     "Equivalent to `generate_studio_output` with `output_type: \"audio\"` — " +
-    "kept as a dedicated tool for backward compatibility. Other Studio " +
-    "output types (video, report, slides, infographic, mindmap, datatable, " +
-    "quiz, flashcards) are only available through the generic " +
+    "kept as a dedicated tool for backward compatibility. The other 8 " +
+    "Studio output types (video, report, slides, infographic, mindmap, " +
+    "datatable, quiz, flashcards) are recognised by the generic " +
     "`generate_studio_output` / `get_studio_output_status` / " +
-    "`download_studio_output` / `get_studio_output_content` tools.",
+    "`download_studio_output` / `get_studio_output_content` tools' schemas, " +
+    "but none are implemented yet — calling any of them returns a clear " +
+    "\"not yet implemented\" error (Phase 2).",
   inputSchema: {
     type: "object",
     properties: {
@@ -164,9 +166,10 @@ export const getAudioStatusTool: Tool = {
     "When status flips to `ready`, call `download_audio` with a destination " +
     "directory.\n\n" +
     "Equivalent to `get_studio_output_status` with `output_type: \"audio\"` " +
-    "— kept as a dedicated tool for backward compatibility. New Studio " +
-    "output types are only available through the generic " +
-    "`get_studio_output_status` tool.",
+    "— kept as a dedicated tool for backward compatibility. The generic " +
+    "`get_studio_output_status` tool accepts the other 8 Studio output " +
+    "types by schema, but none are implemented yet — calling it with any " +
+    "of them returns a clear \"not yet implemented\" error (Phase 2).",
   inputSchema: {
     type: "object",
     properties: {
@@ -195,9 +198,11 @@ export const downloadAudioTool: Tool = {
     "filename (sanitised — usually the audio's title with underscores). " +
     "The full saved path is returned in `result.filePath`.\n\n" +
     "Equivalent to `download_studio_output` with `output_type: \"audio\"` — " +
-    "kept as a dedicated tool for backward compatibility. New file-kind " +
-    "Studio output types (video, report, slides, infographic) are only " +
-    "available through the generic `download_studio_output` tool.",
+    "kept as a dedicated tool for backward compatibility. The other " +
+    "file-kind Studio output types (video, report, slides, infographic) " +
+    "are recognised by the generic `download_studio_output` tool's " +
+    "schema, but none are implemented yet — calling it with any of them " +
+    "returns a clear \"not yet implemented\" error (Phase 2).",
   inputSchema: {
     type: "object",
     properties: {

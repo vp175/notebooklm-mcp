@@ -15,11 +15,13 @@ MCP server for Google NotebookLM. It drives a real Chrome via Patchright (stealt
 - [Multi-account](#multi-account)
 - [Tools](#tools)
 - [Profiles](#tool-profiles)
+- [Prompts](#prompts)
 - [Citations](#citations)
 - [Provenance & AI marker](#provenance--ai-marker)
 - [Configuration reference](#configuration-reference)
 - [Development](#development)
 - [Migration from v1](#changelog--migration)
+- [Unreleased (fork)](#unreleased-local-fork)
 
 ---
 
@@ -107,7 +109,7 @@ codex mcp add notebooklm npx notebooklm-mcp@latest
 
 ### Generic MCP client (stdio)
 
-Any client that can spawn an MCP server over stdio can use the same `npx notebooklm-mcp@latest` invocation. The server speaks MCP 2025 + the SDK's `Server` capability set (`tools`, `resources`, `prompts`, `completions`, `logging`).
+Any client that can spawn an MCP server over stdio can use the same `npx notebooklm-mcp@latest` invocation. The server declares the MCP `tools`, `resources` (with `listChanged: true` — the library emits `resources/list_changed` notifications on mutation), `prompts`, and `completions` capabilities. `logging` is not declared — nothing in this codebase emits MCP log messages yet.
 
 ### HTTP-only clients (n8n, Zapier, Make, hosted agents)
 
@@ -191,7 +193,7 @@ There is no encrypted credential store — isolation is purely by Chrome profile
 
 ## Tools
 
-All tools below are registered in v2.0.0 and visible under the `full` profile. See [Profiles](#tool-profiles) for the trimmed sets.
+This fork registers 24 tools total (20 from upstream v2.0.0 + 4 new generic Studio-output tools), all visible under the `full` profile. See [Profiles](#tool-profiles) for the trimmed sets.
 
 ### Q&A
 
@@ -199,13 +201,25 @@ All tools below are registered in v2.0.0 and visible under the `full` profile. S
 |---|---|
 | `ask_question` | Ask a question against a notebook. Supports session reuse, citation extraction (`source_format`), and per-call browser overrides. Returns answer + `_provenance` envelope. |
 
-### Sources & Studio
+### Sources & Studio (audio-specific)
 
 | Tool | Purpose |
 |---|---|
 | `add_source` | Add a source to a notebook. v2 supports `type=url` (web crawl) and `type=text` (paste). Returns source counts before/after. |
-| `generate_audio` | Generate an Audio Overview. Optional `custom_prompt`, `timeout_ms` (default 600 000 ms). |
-| `download_audio` | Save the most recent Audio Overview to `destination_dir`. Run `generate_audio` first if none exists. |
+| `generate_audio` | Generate an Audio Overview. Optional `custom_prompt`, `timeout_ms` (default 600 000 ms). **Alias** for `generate_studio_output` with `output_type: "audio"`, kept for backward compatibility. |
+| `get_audio_status` | Non-blocking poll for Audio Overview state (`ready` / `in_progress` / `not_started`). **Alias** for `get_studio_output_status` with `output_type: "audio"`. |
+| `download_audio` | Save the most recent Audio Overview to `destination_dir`. Run `generate_audio` first if none exists. **Alias** for `download_studio_output` with `output_type: "audio"`. |
+
+### Studio (generic) — new in this fork
+
+Four tools expose all 9 `StudioOutputType` values (`audio`, `video`, `report`, `slides`, `infographic`, `mindmap`, `datatable`, `quiz`, `flashcards`) through one generate/poll/download-or-extract shape. **Only `audio` is currently backed by a live strategy.** Calling any other `output_type` returns a clear "not yet implemented (Phase 2)" error — the other 8 types require live DOM reconnaissance against an authenticated NotebookLM account that wasn't available while building this server.
+
+| Tool | Purpose |
+|---|---|
+| `generate_studio_output` | Trigger generation for any `output_type`. Async by default (`status: started/in_progress/ready`); pass `wait_for_completion: true` to block. |
+| `get_studio_output_status` | Non-blocking status probe for any `output_type`. Read-only — included in the `standard` profile. |
+| `download_studio_output` | Save a completed **file-kind** output (`audio`, `video`, `report`, `slides`, `infographic`) to `destination_dir`. |
+| `get_studio_output_content` | Extract a completed **structured-kind** output (`mindmap`, `datatable`, `quiz`, `flashcards`) as JSON. |
 
 ### Library
 
@@ -250,7 +264,7 @@ Profiles trim the tool list to keep host-agent context budgets in check.
 | Profile | Tools |
 |---|---|
 | `minimal` | `ask_question`, `get_health`, `list_notebooks`, `select_notebook`, `get_notebook` |
-| `standard` | `minimal` + `setup_auth`, `list_sessions`, `add_notebook`, `update_notebook`, `search_notebooks` |
+| `standard` | `minimal` + `setup_auth`, `list_sessions`, `add_notebook`, `update_notebook`, `search_notebooks`, `get_studio_output_status` |
 | `full` (default) | every tool registered above |
 
 Set the profile persistently:
@@ -275,6 +289,19 @@ NOTEBOOKLM_DISABLED_TOOLS=cleanup_data,re_auth npx notebooklm-mcp@latest
 ```
 
 Settings are persisted in `<configDir>/settings.json` (XDG/`%APPDATA%` location, see config.ts).
+
+---
+
+## Prompts
+
+The server declares two MCP prompts (`prompts/list`, `prompts/get` — no arguments on either):
+
+| Prompt | Purpose |
+|---|---|
+| `notebooklm.auth-setup` | First-time authentication walkthrough: call `setup_auth`, then verify with `get_health` before doing anything else. |
+| `notebooklm.auth-repair` | Fix a broken session (expired cookies, auth errors): call `re_auth`, then verify with `get_health`. |
+
+Both were referenced from tool descriptions (`ask_question`'s auth tip) and declared in the server's `prompts: {}` capability before this fork implemented them — no `ListPromptsRequestSchema`/`GetPromptRequestSchema` handler was registered, so calling either previously failed.
 
 ---
 
@@ -406,6 +433,19 @@ v2 changes the following defaults — adjust if you depended on v1 behaviour:
 - `ANSWER_TIMEOUT_MS` is `600 000` (was hard-coded `120 000`). Set explicitly to keep a 2-minute fail-fast.
 - The follow-up reminder appended to answers is now off. Re-enable with `NOTEBOOKLM_FOLLOW_UP_REMINDER=true`.
 - The AI-generated marker prefix is on by default. Disable with `NOTEBOOKLM_AI_MARKER=false`.
+
+---
+
+## Unreleased (local fork)
+
+This fork (branch `feature/phase1-protocol-upgrade`) sits on top of upstream v2.0.0 and adds protocol-layer fixes plus a Studio-output engine. Not yet published as a release:
+
+- **Corrected declared MCP capabilities**: dropped the invalid `resourceTemplates` sibling key (resource templates are part of the `resources` capability per spec, not a separate one), dropped the unbacked `logging` declaration, and added `resources: { listChanged: true }` with real `resources/list_changed` notifications on every library mutation (add/update/remove/select notebook).
+- **Implemented the two previously dead-referenced prompts**, `notebooklm.auth-setup` and `notebooklm.auth-repair` — the `prompts: {}` capability was declared and tool descriptions pointed at them, but no `ListPromptsRequestSchema`/`GetPromptRequestSchema` handler was ever registered, so calling either failed.
+- **Tool dispatch refactor**: replaced a large switch statement with a handler map, and extracted a shared `withRecovery()` helper used by `ask_question` and `reset_session`.
+- **Generic Studio-output engine**: `generate_studio_output` / `get_studio_output_status` / `download_studio_output` / `get_studio_output_content` cover all 9 NotebookLM Studio output types by schema. Only `audio` is wired to a live strategy — the other 8 types return a clear "not yet implemented (Phase 2)" error, since implementing them requires live DOM reconnaissance against an authenticated NotebookLM account that wasn't available while building this. `generate_audio`/`get_audio_status`/`download_audio` remain as backward-compatible aliases for `output_type: "audio"`.
+- **`structuredContent`/`outputSchema`** added to tool results that declare an output schema, with `isError` set correctly when those tools fail.
+- **Elicitation** added to `remove_notebook` and `cleanup_data` (with a fallback for clients that don't declare the elicitation capability), failing closed if the elicitation request itself errors rather than silently proceeding.
 
 ---
 

@@ -48,6 +48,7 @@ const PROFILES: Record<ProfileName, string[]> = {
     "add_notebook",
     "update_notebook",
     "search_notebooks",
+    "get_studio_output_status",
   ],
   full: ["*"], // All tools
 };
