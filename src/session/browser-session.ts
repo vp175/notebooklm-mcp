@@ -512,7 +512,7 @@ export class BrowserSession {
     if (!this.initialized || !this.page || this.isPageClosedSafe()) {
       await this.init();
     }
-    return await generateAudioOnPage(this.page!, options);
+    return this.withRecovery("generateAudio", () => generateAudioOnPage(this.page!, options));
   }
 
   /**
@@ -522,7 +522,7 @@ export class BrowserSession {
     if (!this.initialized || !this.page || this.isPageClosedSafe()) {
       await this.init();
     }
-    return await getAudioStatusOnPage(this.page!);
+    return this.withRecovery("getAudioStatus", () => getAudioStatusOnPage(this.page!));
   }
 
   /**
@@ -532,7 +532,7 @@ export class BrowserSession {
     if (!this.initialized || !this.page || this.isPageClosedSafe()) {
       await this.init();
     }
-    return await downloadAudioOnPage(this.page!, destinationDir);
+    return this.withRecovery("downloadAudio", () => downloadAudioOnPage(this.page!, destinationDir));
   }
 
   /**
