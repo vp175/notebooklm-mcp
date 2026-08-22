@@ -3,10 +3,68 @@ import {
   ListResourceTemplatesRequestSchema,
   ReadResourceRequestSchema,
   CompleteRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { NotebookLibrary } from "../library/notebook-library.js";
 import { log } from "../utils/logger.js";
+
+const PROMPTS = [
+  {
+    name: "notebooklm.auth-setup",
+    description:
+      "First-time NotebookLM authentication walkthrough: run setup_auth, " +
+      "then verify with get_health before doing anything else.",
+  },
+  {
+    name: "notebooklm.auth-repair",
+    description:
+      "Fix a broken NotebookLM session (expired cookies, auth errors): " +
+      "run re_auth, then verify with get_health.",
+  },
+] as const;
+
+function buildPromptMessages(name: string): { role: "user"; content: { type: "text"; text: string } }[] {
+  if (name === "notebooklm.auth-setup") {
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text:
+            "Set up NotebookLM authentication for the first time:\n" +
+            "1. Call `setup_auth` with `show_browser: true`. A Chrome window " +
+            "opens — the human logs into their Google account (up to 10 " +
+            "minutes).\n" +
+            "2. Call `get_health` and confirm `authenticated: true`.\n" +
+            "3. If `get_health` still reports unauthenticated after step 1, " +
+            "wait 30 seconds and re-check — the login may still be in " +
+            "progress in the visible browser window.",
+        },
+      },
+    ];
+  }
+  if (name === "notebooklm.auth-repair") {
+    return [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text:
+            "Repair a broken NotebookLM session:\n" +
+            "1. Call `re_auth` with `show_browser: true` to wipe stored " +
+            "auth and log in again.\n" +
+            "2. Call `get_health` and confirm `authenticated: true`.\n" +
+            "3. If the notebook itself is inaccessible after re-auth, " +
+            "confirm the notebook URL is still valid with `get_notebook` " +
+            "or `list_notebooks`.",
+        },
+      },
+    ];
+  }
+  throw new Error(`Unknown prompt: ${name}`);
+}
 
 /**
  * Handlers for MCP Resource-related requests
@@ -236,6 +294,26 @@ export class ResourceHandlers {
         log.warning(`⚠️  [MCP] completion error: ${e}`);
       }
       return { completion: { values: [], total: 0 } };
+    });
+
+    // List available prompts
+    server.setRequestHandler(ListPromptsRequestSchema, async () => {
+      log.info("📜 [MCP] list_prompts request received");
+      return { prompts: PROMPTS.map((p) => ({ name: p.name, description: p.description })) };
+    });
+
+    // Get a specific prompt's messages
+    server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      const { name } = request.params;
+      log.info(`📜 [MCP] get_prompt request: ${name}`);
+      const prompt = PROMPTS.find((p) => p.name === name);
+      if (!prompt) {
+        throw new Error(
+          `Unknown prompt: ${name}. Supported: ${PROMPTS.map((p) => p.name).join(", ")}. ` +
+            "Call prompts/list to discover the active set."
+        );
+      }
+      return { description: prompt.description, messages: buildPromptMessages(name) };
     });
   }
 

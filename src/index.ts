@@ -158,11 +158,18 @@ class NotebookLMMCPServer {
       {
         capabilities: {
           tools: {},
-          resources: {},
-          resourceTemplates: {},
+          // Resource templates are part of the `resources` capability per the
+          // MCP spec, not a sibling key — `resourceTemplates: {}` here was
+          // never a valid capability declaration.
+          resources: { listChanged: true },
           prompts: {},
           completions: {}, // Required for completion/complete support
-          logging: {},
+          // `logging: {}` was declared with no SetLevelRequestSchema handler
+          // and no sendLoggingMessage call anywhere in the codebase — the
+          // same "declared but not backed" bug fixed for `prompts` below.
+          // Dropped rather than implemented: nothing in this codebase emits
+          // MCP log messages today, so a real implementation has no content
+          // to carry yet. Re-add when something needs it.
         },
         // MCP-spec server instructions (clients merge into the system prompt).
         // Use these for cross-tool workflow guidance — do not duplicate
