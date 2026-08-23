@@ -306,21 +306,27 @@ export async function snapshotPriorAnswers(page: Page): Promise<string[]> {
 }
 
 /**
- * How many answer containers are on the page right now.
+ * Every answer container's sanitised text, in DOM order (empty ones included
+ * as ""), read in ONE round trip.
  *
- * Text alone cannot tell a NEW answer from a prior one when the two are
- * identical — ask the same question twice in one notebook and NotebookLM
- * answers the same way, so an ignore-list keyed on text rejects the genuine
- * new answer forever and the wait runs to its 10-minute timeout (observed).
- * Counting containers settles it structurally: once a new one exists, the last
- * container IS this turn's answer whatever it says.
+ * The count and the text must come from the same observation. When they came
+ * from two separate reads — or worse, two different selectors — the wait could
+ * see "a new container exists" while still reading the PREVIOUS turn's text,
+ * and return that as the answer.
  */
-export async function countAnswerContainers(page: Page): Promise<number> {
+export async function readAnswerTexts(page: Page): Promise<string[]> {
   return page
     .locator(Selectors.chat.answerText)
-    .count()
-    .catch(() => 0);
+    .allInnerTexts()
+    .then((texts) => texts.map((t) => sanitizeAnswer(t)))
+    .catch(() => []);
 }
+
+/** How many answer containers are on the page right now. */
+export async function countAnswerContainers(page: Page): Promise<number> {
+  return readAnswerTexts(page).then((t) => t.length);
+}
+
 
 /**
  * Wait for the *latest* answer text to appear and stabilise.
@@ -368,16 +374,7 @@ export async function waitForStableAnswer(
   let lastSeen: string | null = null;
   let stableStreak = 0;
   let pollCount = 0;
-  /**
-   * Set once the text differs from what was on the page when this wait began.
-   * Together with a grown container count this is what distinguishes "the new
-   * answer happens to read like an old one" from "we are still looking at the
-   * old one".
-   */
-  let sawChange = false;
-  /** Consecutive polls that have seen a grown container count. */
-  let newContainerStreak = 0;
-  const initialKey = answerKey((await readLatestAnswer(page)) ?? "");
+
 
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
@@ -388,50 +385,49 @@ export async function waitForStableAnswer(
       throw new Error("Browser page unresponsive: health check timed out");
     }
 
-    let candidate: string | null = null;
+    // ONE observation per poll: the same read answers both "is there a new
+    // container?" and "what does it say?". Two separate reads let the wait
+    // believe a new answer had arrived while it was still looking at the
+    // previous turn's text.
+    let texts: string[] = [];
     try {
-      candidate = await readLatestAnswer(page);
+      texts = await readAnswerTexts(page);
     } catch (err) {
       if (isRecoverable(err)) throw err;
       // Non-fatal extraction blip — try again next tick.
     }
 
-    // Structural check first: has a NEW answer container appeared? Once it
-    // has, whatever the newest container says is this turn's answer — even if
-    // it is word-for-word a previous one (ask the same question twice and it
-    // will be). Only when the count has not grown do we fall back to the
-    // text-based ignore list.
-    let newContainerPresent = false;
-    if (priorAnswerCount !== undefined) {
-      try {
-        newContainerPresent = (await countAnswerContainers(page)) > priorAnswerCount;
-      } catch {
-        // Counting failed — fall back to the text comparison below.
-      }
-    }
-    newContainerStreak = newContainerPresent ? newContainerStreak + 1 : 0;
+    let candidate: string | null = null;
+    let candidateIsNewTurn = false;
 
-    if (candidate && answerKey(candidate) !== initialKey) {
-      sawChange = true;
+    if (priorAnswerCount !== undefined && texts.length > priorAnswerCount) {
+      // A container appeared for THIS turn. Read that container specifically —
+      // never an older one — so an answer identical to an earlier one is still
+      // recognised, and a not-yet-painted container never resolves to stale
+      // text. While it is empty we simply keep waiting.
+      const own = texts[texts.length - 1] ?? "";
+      if (own.length > 0) {
+        candidate = own;
+        candidateIsNewTurn = true;
+      }
+    } else {
+      // No prior count (or none appeared yet): fall back to the last container
+      // that has text, guarded by the ignore list below.
+      for (let i = texts.length - 1; i >= 0; i--) {
+        const t = texts[i] ?? "";
+        if (t.length > 0) {
+          candidate = t;
+          break;
+        }
+      }
     }
 
     if (candidate) {
       const isEcho = candidate.toLowerCase() === echoLower;
-      // Both guards apply. The text guard alone cannot accept a genuine answer
-      // that repeats an earlier one; the count alone cannot be trusted, because
-      // the container count grows as soon as the question is submitted — before
-      // any answer text exists (observed: poll 1 already saw the higher count
-      // while the text was still the previous turn's). So: skip anything that
-      // matches a prior answer UNLESS a new container exists AND the text has
-      // changed since this wait began.
-      // A grown container count that has HELD for two consecutive polls is
-      // sufficient on its own: the new answer exists and is fully painted, so
-      // even text identical to an earlier answer is this turn's answer. Without
-      // this, a repeated question whose (identical) answer paints inside a
-      // single 750 ms poll gap never sets `sawChange` and the call burned the
-      // whole 10-minute timeout.
-      const newAnswerProven = newContainerPresent && (sawChange || newContainerStreak >= 2);
-      const isPrior = ignoreKeys.has(answerKey(candidate)) && !newAnswerProven;
+      // The ignore list only applies when we could NOT identify this turn's own
+      // container. Once we are reading that container, its text is this turn's
+      // answer whatever it says — that is what makes a repeated question work.
+      const isPrior = !candidateIsNewTurn && ignoreKeys.has(answerKey(candidate));
 
       if (!isEcho && !isPrior) {
         // Loading placeholders ("Parsing the data…", "Thinking…", …) are
@@ -478,34 +474,6 @@ export async function waitForStableAnswer(
   return null;
 }
 
-/**
- * Read the latest answer container's text and strip UI-control leakage.
- * Uses `:last-child` so we always target the most recent turn.
- */
-async function readLatestAnswer(page: Page): Promise<string | null> {
-  try {
-    // Read every answer container through the SAME selector the container
-    // count uses, and take the last one that actually has text.
-    //
-    // Two failure modes are being avoided at once:
-    //  - `.to-user-container:last-child .message-text-content` (the old
-    //    reader) resolves to an OLDER container whenever the newest one is not
-    //    its parent's last child, so the wait saw the PREVIOUS turn's text as a
-    //    stable answer — two different questions in one session came back
-    //    byte-identical (223 chars, verified live).
-    //  - taking `.last()` unconditionally reads the freshly-appended container
-    //    while it is still EMPTY, so the answer never appears at all.
-    // Last non-empty match is the only reading that survives both.
-    const texts = await page.locator(Selectors.chat.answerText).allInnerTexts();
-    for (let i = texts.length - 1; i >= 0; i--) {
-      const cleaned = sanitizeAnswer(texts[i] ?? "");
-      if (cleaned.length > 0) return cleaned;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 
 /**
