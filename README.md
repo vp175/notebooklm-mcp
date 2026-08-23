@@ -226,6 +226,7 @@ Four tools expose all 9 `StudioOutputType` values (`audio`, `video`, `report`, `
 | Tool | Purpose |
 |---|---|
 | `add_notebook` | Add a NotebookLM share-URL to the local library with metadata. Requires explicit user confirmation. |
+| `discover_notebooks` | Scan the account's dashboard and register any notebooks not already in the library — including ones created directly in the web UI, which `add_notebook` alone can't see. No input; safe to re-run. |
 | `list_notebooks` | List every notebook in the library with metadata. |
 | `get_notebook` | Fetch one notebook by `id`. |
 | `select_notebook` | Set a notebook as the active default for `ask_question`. |
@@ -264,7 +265,7 @@ Profiles trim the tool list to keep host-agent context budgets in check.
 | Profile | Tools |
 |---|---|
 | `minimal` | `ask_question`, `get_health`, `list_notebooks`, `select_notebook`, `get_notebook` |
-| `standard` | `minimal` + `setup_auth`, `list_sessions`, `add_notebook`, `update_notebook`, `search_notebooks`, `get_studio_output_status` |
+| `standard` | `minimal` + `setup_auth`, `list_sessions`, `add_notebook`, `discover_notebooks`, `update_notebook`, `search_notebooks`, `get_studio_output_status` |
 | `full` (default) | every tool registered above |
 
 Set the profile persistently:

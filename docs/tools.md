@@ -382,6 +382,26 @@ Add a NotebookLM share-URL to the local library. The tool description enforces a
 
 ---
 
+## discover_notebooks
+
+Scan the account's NotebookLM dashboard (https://notebook.google.com/) and register any notebooks not already in the local library — notebooks created directly in the web UI, which `add_notebook` alone can never see since it only stores whatever URL it's handed. No parameters. Requires an authenticated session. Dedupes by notebook UUID, so it's safe to call repeatedly. Newly-registered notebooks get placeholder metadata (empty `topics`, a generic `description`, the `auto-discovered` tag) — follow up with `update_notebook` to fill those in.
+
+### Return shape
+
+```jsonc
+{
+  "success": true,
+  "data": {
+    "discovered": [{ "id": "…", "url": "https://notebook.google.com/notebook/…", "title": "…" }],
+    "added": [/* full NotebookEntry objects, only the newly-registered ones */],
+    "skipped_existing": 0,
+    "note": "present only when 0 tiles were found, to distinguish a genuinely empty account from a possible selector/layout change"
+  }
+}
+```
+
+---
+
 ## list_notebooks
 
 No parameters. Returns the full library.

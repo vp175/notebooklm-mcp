@@ -68,9 +68,14 @@ sources, ingest sources, generate Audio Overviews).
 
 1. \`get_health\` → if \`authenticated=false\`, run \`setup_auth\` (opens
    a browser tab — user logs in once, cookies persist).
-2. \`add_notebook\` to register a NotebookLM share-URL into the local
-   library (the user must provide the URL — see add_notebook for the link
-   workflow). Optionally \`select_notebook\` to make it the default.
+2. Get notebooks into the library, either way:
+   - \`discover_notebooks\` — no input, scans the account's dashboard and
+     registers every notebook already there (including ones created
+     directly in the web UI, which \`add_notebook\` alone can't see). Safe
+     to re-run; already-registered notebooks are skipped, not duplicated.
+   - \`add_notebook\` — register one specific notebook by share-URL (the
+     user must provide it — see add_notebook for the link workflow).
+   Optionally \`select_notebook\` to make one the default.
 3. \`ask_question\` — start asking. Save the returned \`session_id\` and
    reuse it for follow-up questions to keep context.
 
@@ -301,6 +306,7 @@ class NotebookLMMCPServer {
         "add_notebook",
         (args) => h.handleAddNotebook(args as unknown as Parameters<typeof h.handleAddNotebook>[0]),
       ],
+      ["discover_notebooks", () => h.handleDiscoverNotebooks()],
       ["list_notebooks", () => h.handleListNotebooks()],
       [
         "get_notebook",
