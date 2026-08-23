@@ -14,7 +14,7 @@
  * error for them rather than allowing a call to fail confusingly deeper in
  * the DOM layer.
  */
-import type { Page, Locator } from "patchright";
+import type { Page, Locator, Frame } from "patchright";
 import path from "path";
 import { safeSleep, isRecoverable } from "../browser/watchdog.js";
 import { log } from "../utils/logger.js";
@@ -452,6 +452,68 @@ export async function downloadViaSingleMenuItem(
     if (!popup) popup = await popupPromise.catch(() => undefined);
     await popup?.close().catch(() => undefined);
   }
+}
+
+/**
+ * Opens a completed structured-kind tile's content viewer by clicking its
+ * full-tile-covering `button.artifact-stretched-button` — confirmed live
+ * 2026-08-23 as the real click target (clicking the outer
+ * `.artifact-item-button` container itself, or its inner
+ * `.artifact-primary-content` description div, does NOT reliably open the
+ * viewer; earlier attempts this session silently landed on the unchanged
+ * default notebook view and were misread as "viewer didn't open" for a
+ * different reason — see `getSandboxFrame` below for what that reason
+ * actually was).
+ */
+export async function openStructuredViewer(
+  page: Page,
+  readySelectors: readonly string[]
+): Promise<void> {
+  const tile = page.locator(joinAlt(readySelectors)).first();
+  const stretchedBtn = tile.locator("button.artifact-stretched-button").first();
+  await stretchedBtn.click({ timeout: 10_000 });
+}
+
+/**
+ * Locates the cross-origin sandboxed iframe NotebookLM renders structured-
+ * content viewers into (Mind Map, Flashcards, Quiz — confirmed live
+ * 2026-08-23 for all three; Data Table is the one exception, rendering a
+ * plain `<table>` directly in the main frame instead). URL shape:
+ * `blob:https://<id>-h966586903.scf.usercontent.goog/<uuid>`. This is WHY
+ * `page.evaluate`/`document.querySelector` from the main frame always came
+ * back empty against a genuinely-open viewer earlier this session — the
+ * content lives in a different frame's document entirely, invisible to
+ * main-frame DOM queries no matter how the click itself was fixed. Callers
+ * must use `frame.evaluate`/`frame.locator`, not `page.evaluate`, to read
+ * viewer content.
+ *
+ * KNOWN LIMITATION (not yet verified either way, flagged during review):
+ * this picks whichever matching frame appears FIRST in `page.frames()`,
+ * with no check that it belongs to the viewer THIS call just opened. If a
+ * previously-opened structured viewer is never closed and the session's
+ * page is reused for a second extraction (same or different type), a
+ * stale frame could be picked instead of the fresh one. A cross-type
+ * sequence (e.g. extract Mind Map, then Quiz, in the same session) would
+ * most likely fail loudly — the new viewer's own root/counter `waitFor`
+ * would time out against the stale frame's unrelated DOM. A same-type
+ * re-extraction is the case with real silent-wrong-content risk, and it's
+ * unconfirmed whether NotebookLM's SPA actually detaches the previous
+ * iframe when a new viewer opens. Not fixed here for lack of a verified
+ * repro; worth a live check before this class of back-to-back call is
+ * relied on.
+ */
+export async function getSandboxFrame(page: Page, timeoutMs = 10_000): Promise<Frame> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const frame = page
+      .frames()
+      .find((f) => f.url().startsWith("blob:") && f.url().includes("usercontent.goog"));
+    if (frame) return frame;
+    await page.waitForTimeout(300);
+  }
+  throw new Error(
+    "Sandboxed content frame (*.scf.usercontent.goog) did not appear — the viewer may not have opened."
+  );
 }
 
 export type {

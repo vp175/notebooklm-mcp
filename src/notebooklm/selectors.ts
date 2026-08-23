@@ -513,6 +513,27 @@ export const Selectors = {
       '[role="menuitem"]:has-text("Downloaden")',
       '[role="menuitem"]:has-text("ダウンロード")',
     ],
+    /**
+     * Structured-kind trigger tiles, confirmed live 2026-08-23: same
+     * dialog-based trigger flow as the file kinds (Data Table/Flashcards/
+     * Quiz/Mind Map each open a "Customize <Type>" dialog with a Generate
+     * button — Flashcards/Quiz additionally expose Number-of-cards/
+     * questions and Level-of-Difficulty fields; Mind Map's dialog is just
+     * Sources + a topic prompt). See mindmap.ts/datatable.ts/flashcards.ts/
+     * quiz.ts for each type's completed-content viewer, which — unlike the
+     * file kinds' three-dot-menu download — renders inside a cross-origin
+     * sandboxed iframe (`*.scf.usercontent.goog`) for every type except
+     * Data Table, which renders a plain `<table>` directly in the main
+     * frame.
+     */
+    dataTableButton: studioTriggerSelectors(STUDIO_TILE_ICON_LIGATURES.datatable, "Data Table"),
+    dataTableTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.datatable),
+    flashcardsButton: studioTriggerSelectors(STUDIO_TILE_ICON_LIGATURES.flashcards, "Flashcards"),
+    flashcardsTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.flashcards),
+    quizButton: studioTriggerSelectors(STUDIO_TILE_ICON_LIGATURES.quiz, "Quiz"),
+    quizTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.quiz),
+    mindmapButton: studioTriggerSelectors(STUDIO_TILE_ICON_LIGATURES.mindmap, "Mind Map"),
+    mindmapTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.mindmap),
   },
 
   notebooks: {

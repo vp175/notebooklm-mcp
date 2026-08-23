@@ -44,6 +44,10 @@ import {
 import "../notebooklm/video-overview.js";
 import "../notebooklm/infographic.js";
 import "../notebooklm/slides.js";
+import "../notebooklm/datatable.js";
+import "../notebooklm/mindmap.js";
+import "../notebooklm/flashcards.js";
+import "../notebooklm/quiz.js";
 import {
   generateStudioOutput,
   getStudioOutputStatus,

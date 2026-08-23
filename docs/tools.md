@@ -247,7 +247,7 @@ Run `generate_audio` first if no Audio Overview exists yet.
 
 ## generate_studio_output — new in this fork
 
-Generic trigger for any of the 9 `StudioOutputType` values. **Async by default**, same status semantics as `generate_audio`. **`audio`, `video`, `infographic`, and `slides` are backed by live strategies** — every other value (`report`, `mindmap`, `datatable`, `quiz`, `flashcards`) returns an error: `Studio output type "<type>" is not yet implemented by this server (Phase 2). Implemented types: audio, video, infographic, slides.` KNOWN LIMITATION: in-progress status detection is unreliable against the current UI (a real ~7-minute generation was observed reporting `not_started` throughout) — avoid calling this twice for the same `output_type` in quick succession while a generation may already be running.
+Generic trigger for any of the 9 `StudioOutputType` values. **Async by default**, same status semantics as `generate_audio`. **8 of 9 values are backed by live-verified strategies**: `audio`, `video`, `infographic`, `slides` (file-kind, use `download_studio_output`) and `mindmap`, `datatable`, `quiz`, `flashcards` (structured-kind, use `get_studio_output_content`). Only `report` returns an error: `Studio output type "report" is not yet implemented by this server (Phase 2).` KNOWN LIMITATION: in-progress status detection is unreliable against the current UI (a real ~7-minute generation was observed reporting `not_started` throughout) — avoid calling this twice for the same `output_type` in quick succession while a generation may already be running.
 
 ### Parameters
 
@@ -255,7 +255,7 @@ Generic trigger for any of the 9 `StudioOutputType` values. **Async by default**
 |---|---|---|---|
 | `output_type` | string | yes | One of `audio`, `video`, `report`, `slides`, `infographic`, `mindmap`, `datatable`, `quiz`, `flashcards`. |
 | `custom_prompt` | string | no | Optional focus prompt. |
-| `difficulty` | string | no | Only used by quiz/flashcards (Phase 2 — currently ignored since neither is implemented). |
+| `difficulty` | string | no | Intended for quiz/flashcards, but not currently forwarded to their trigger dialogs — both are generated at the dialog's default difficulty regardless of this value. |
 | `wait_for_completion` | boolean | no | Block until ready (up to `timeout_ms`). Default `false`. |
 | `timeout_ms` | number | no | Default `600000`. |
 | `show_browser` | boolean | no | |
@@ -342,14 +342,20 @@ Extract a completed **structured-kind** output (`mindmap`, `datatable`, `quiz`, 
   "data": {
     "result": {
       "success": true,
-      "content": {}, // shape depends on output_type — not yet defined, none of these 4 types are implemented
-      "message": "..."
+      "content": {} // shape depends on output_type, see below
     }
   }
 }
 ```
 
-None of the 4 structured kinds are implemented as of this fork — every call currently returns the Phase 2 "not yet implemented" error described under `generate_studio_output` above.
+`content`'s shape per `output_type` (see each type's own module — `src/notebooklm/mindmap.ts`, `datatable.ts`, `flashcards.ts`, `quiz.ts` — for the live-confirmed DOM behavior each extraction works around):
+
+- `mindmap`: `{ root: { label: string, children: [...], incomplete?: { expectedChildren, capturedChildren } } }`. `incomplete` appears on a node only when fewer children were captured than its own declared count — an honest partial-read signal, never silently dropped.
+- `datatable`: `{ headers: string[], rows: string[][] }`.
+- `flashcards`: `{ cards: { front: string, back: string }[], missingPositions?: number[] }`.
+- `quiz`: `{ questions: { question: string, options: string[] }[], missingPositions?: number[] }`. Options are read directly from the DOM, never selected — clicking an answer would record it server-side, a side effect this tool has no business causing.
+
+For `flashcards`/`quiz`, `missingPositions` (1-indexed) lists any position that was never captured during the walk — again an honest signal rather than a silent gap.
 
 ---
 

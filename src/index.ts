@@ -122,15 +122,17 @@ For synchronous behaviour pass \`wait_for_completion: true\` to
   accounts.
 - Session timeout: ~15 min idle (see \`get_health.session_timeout\`).
 - File / YouTube / Drive source uploads are not yet implemented in v2.0.
-- Audio Overview, Video Overview, Infographic, and Slide Deck are the
-  Studio outputs currently implemented, exposed via
+- 8 of the 9 Studio output types are implemented, exposed via
   \`generate_studio_output\`/\`get_studio_output_status\`/
   \`download_studio_output\`/\`get_studio_output_content\` (and the legacy
   \`generate_audio\`/\`get_audio_status\`/\`download_audio\` audio-only
-  aliases). The tool schema accepts all 9 Studio output types, but calling
-  \`report\`, \`mindmap\`, \`datatable\`, \`quiz\`, or \`flashcards\` returns a
-  clear "not yet implemented" error (Phase 2) — their trigger dialogs are
-  live-confirmed but their completed-content viewers still need DOM
+  aliases): Audio Overview, Video Overview, Infographic, and Slide Deck
+  (file-kind, use \`download_studio_output\`); Mind Map, Data Table, Quiz,
+  and Flashcards (structured-kind, use \`get_studio_output_content\`, which
+  returns each node/card/question honestly flagged if a partial read
+  ever occurs rather than silently wrong). Only \`report\` returns a clear
+  "not yet implemented" error (Phase 2) — its trigger dialog is
+  live-confirmed but its completed-content viewer still needs DOM
   reconnaissance before extraction can be built.
 - KNOWN LIMITATION: mid-generation status reporting is currently
   unreliable — avoid calling \`generate_studio_output\` twice for the same
