@@ -212,7 +212,7 @@ This fork registers 24 tools total (20 from upstream v2.0.0 + 4 new generic Stud
 
 ### Studio (generic) — new in this fork
 
-Four tools expose all 9 `StudioOutputType` values (`audio`, `video`, `report`, `slides`, `infographic`, `mindmap`, `datatable`, `quiz`, `flashcards`) through one generate/poll/download-or-extract shape. **Only `audio` is currently backed by a live strategy.** Calling any other `output_type` returns a clear "not yet implemented (Phase 2)" error — the other 8 types require live DOM reconnaissance against an authenticated NotebookLM account that wasn't available while building this server.
+Four tools expose all 9 `StudioOutputType` values (`audio`, `video`, `report`, `slides`, `infographic`, `mindmap`, `datatable`, `quiz`, `flashcards`) through one generate/poll/download-or-extract shape. **`audio`, `video`, `infographic`, and `slides` are backed by live, verified strategies** — each confirmed end-to-end (or, for video/infographic/slides, dialog-confirmed with download verified via the shared helper) against a real authenticated account. Calling any of the remaining 5 types (`report`, `mindmap`, `datatable`, `quiz`, `flashcards`) returns a clear "not yet implemented (Phase 2)" error. Their trigger dialogs have been live-observed (each opens a "Customize <Type>" dialog with real fields — Flashcards/Quiz expose Number/Difficulty options, Mind Map/Data Table are simpler), and real sample generations exist, but their completed-content viewers did not yield to DOM inspection in the time available this round, so `extractContent()` was deliberately left unbuilt rather than guessed.
 
 | Tool | Purpose |
 |---|---|

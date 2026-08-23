@@ -247,7 +247,7 @@ Run `generate_audio` first if no Audio Overview exists yet.
 
 ## generate_studio_output — new in this fork
 
-Generic trigger for any of the 9 `StudioOutputType` values. **Async by default**, same status semantics as `generate_audio`. **Only `output_type: "audio"` is backed by a live strategy** — every other value (`video`, `report`, `slides`, `infographic`, `mindmap`, `datatable`, `quiz`, `flashcards`) returns an error: `Studio output type "<type>" is not yet implemented by this server (Phase 2). Implemented types: audio.`
+Generic trigger for any of the 9 `StudioOutputType` values. **Async by default**, same status semantics as `generate_audio`. **`audio`, `video`, `infographic`, and `slides` are backed by live strategies** — every other value (`report`, `mindmap`, `datatable`, `quiz`, `flashcards`) returns an error: `Studio output type "<type>" is not yet implemented by this server (Phase 2). Implemented types: audio, video, infographic, slides.` KNOWN LIMITATION: in-progress status detection is unreliable against the current UI (a real ~7-minute generation was observed reporting `not_started` throughout) — avoid calling this twice for the same `output_type` in quick succession while a generation may already be running.
 
 ### Parameters
 
