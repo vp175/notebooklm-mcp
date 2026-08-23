@@ -58,9 +58,14 @@ const preview = await mgr.getCleanupPaths("deep", true); // preserve_library: tr
 const all = preview.totalPaths.map((p) => path.resolve(p));
 // Under preserve_library the DATA dir (which holds library.json) must survive.
 // configDir holds settings.json and is legitimately wiped by this mode.
-const namesLive = all.filter(
-  (p) => p === path.resolve(layout.data) || p.startsWith(path.resolve(libraryFile))
-);
+// Fail on a path that IS the live data dir or CONTAINS it — an enumerated
+// parent would destroy library.json just as surely as the dir itself, and an
+// equality-only check would pass while that happened.
+const contains = (parent, child) => {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+};
+const namesLive = all.filter((p) => contains(p, layout.data) || contains(p, libraryFile));
 const sawLegacy = all.some((p) => p === path.resolve(legacyDir));
 
 console.log(`platform=${PLATFORM}`);
@@ -70,8 +75,10 @@ console.log(
   `  ${namesLive.length === 0 ? "[PASS]" : "[FAIL]"} live DATA dir (holds library.json) NOT listed for deletion` +
     (namesLive.length ? ` — would delete ${namesLive.join(", ")}` : "")
 );
-console.log(`  ${sawLegacy ? "[PASS]" : "[WARN]"} genuinely-legacy -nodejs dir still offered`);
+console.log(`  ${sawLegacy ? "[PASS]" : "[FAIL]"} genuinely-legacy -nodejs dir still offered (positive control)`);
 console.log(`  library.json still on disk: ${fs.existsSync(libraryFile)}`);
 
 fs.rmSync(root, { recursive: true, force: true });
-process.exit(namesLive.length === 0 ? 0 : 1);
+// `sawLegacy` is a HARD requirement, not a warning: without it a broken
+// platform/homedir stub enumerates nothing and the test passes vacuously.
+process.exit(namesLive.length === 0 && sawLegacy ? 0 : 1);

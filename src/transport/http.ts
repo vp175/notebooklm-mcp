@@ -170,6 +170,10 @@ async function writeWebResponse(res: ServerResponse, response: Response): Promis
     void reader.cancel().catch(() => undefined);
   };
   res.on("close", onClose);
+  // ONE shared close promise, created here rather than per iteration: adding a
+  // `once("close")` inside the loop would accumulate listeners under sustained
+  // backpressure and trip the MaxListeners warning.
+  const closed = new Promise<void>((resolve) => res.once("close", resolve));
 
   try {
     for (;;) {
@@ -179,7 +183,20 @@ async function writeWebResponse(res: ServerResponse, response: Response): Promis
       // Respect backpressure: without this a slow consumer buffers the whole
       // stream in this process's memory.
       if (!res.write(Buffer.from(value))) {
-        await new Promise<void>((resolve) => res.once("drain", resolve));
+        // Race the drain against the client going away. Node never emits
+        // `drain` on a DESTROYED response, so awaiting it alone strands this
+        // pump forever when a client disconnects mid-backpressure — holding
+        // the reader and the SDK stream behind it, and never reaching the
+        // `finally`. Cancelling the reader in `onClose` does not help: the
+        // loop is parked on `drain`, not on `read()`.
+        let onDrain!: () => void;
+        const drained = new Promise<void>((resolve) => {
+          onDrain = resolve;
+          res.once("drain", onDrain);
+        });
+        await Promise.race([drained, closed]);
+        res.off("drain", onDrain);
+        if (clientGone || res.destroyed) break;
       }
     }
   } finally {

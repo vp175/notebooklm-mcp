@@ -59,6 +59,19 @@ export class SessionManager {
       `  Timeout: ${this.sessionTimeout}s (${Math.floor(this.sessionTimeout / 60)} minutes)`
     );
 
+    this.startIdleSweeper();
+  }
+
+  /**
+   * (Re)start the periodic idle-session sweep.
+   *
+   * Restartable because `closeAllSessions()` stops it, and that is called by
+   * `setup_auth` and `re_auth` as well as by shutdown — so after either of
+   * those the sweeper was DEAD for the rest of the process and idle sessions
+   * accumulated until max-sessions eviction kicked in.
+   */
+  private startIdleSweeper(): void {
+    if (this.cleanupInterval) return;
     const cleanupIntervalSeconds = Math.max(60, Math.min(Math.floor(this.sessionTimeout / 2), 300));
     this.cleanupInterval = setInterval(() => {
       this.cleanupInactiveSessions().catch((error) => {
@@ -135,6 +148,15 @@ export class SessionManager {
           `  Switching from ${currentMode ? "HEADLESS" : "VISIBLE"} to ${overrideHeadless ? "VISIBLE" : "HEADLESS"}`
         );
 
+        // A visibility flip tears down the shared context, so it closes EVERY
+        // session — including ones other callers are mid-operation on. Refuse
+        // rather than fail them with an unexplained "Target closed".
+        if (this.busySessions.size > 0) {
+          throw new Error(
+            `Cannot change browser visibility while ${this.busySessions.size} session(s) are ` +
+              `mid-operation — that would close their pages. Retry once they finish.`
+          );
+        }
         // Close all sessions (they all use the same context)
         await this.closeAllSessions();
         log.success(`  ✅ All sessions closed, browser context will be recreated with new mode`);
@@ -377,7 +399,7 @@ export class SessionManager {
   /**
    * Close all sessions (used during shutdown)
    */
-  async closeAllSessions(): Promise<void> {
+  async closeAllSessions({ shutdown = false }: { shutdown?: boolean } = {}): Promise<void> {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = undefined;
@@ -387,6 +409,7 @@ export class SessionManager {
       log.warning("🛑 Closing shared context (no active sessions)...");
       await this.sharedContextManager.closeContext();
       log.success("✅ All sessions closed");
+      if (!shutdown) this.startIdleSweeper();
       return;
     }
 
@@ -406,6 +429,7 @@ export class SessionManager {
     await this.sharedContextManager.closeContext();
 
     log.success("✅ All sessions closed");
+    if (!shutdown) this.startIdleSweeper();
   }
 
   /**

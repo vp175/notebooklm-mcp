@@ -1662,7 +1662,7 @@ export class ToolHandlers {
    */
   async cleanup(): Promise<void> {
     log.info(`🧹 Cleaning up tool handlers...`);
-    await this.sessionManager.closeAllSessions();
+    await this.sessionManager.closeAllSessions({ shutdown: true });
     log.success(`✅ Tool handlers cleanup complete`);
   }
 }

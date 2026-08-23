@@ -232,16 +232,27 @@ function bannerBody(text: string): string {
   return text.trim().toLowerCase().replace(/^[^\p{L}\p{N}]+/u, "");
 }
 
-function isErrorMessage(text: string): boolean {
+/**
+ * Match like `isPlaceholder`: the snippet must BE the text or OPEN it.
+ *
+ * `includes()` was still in here and subsumed the other two, so the length gate
+ * was the only real guard and short real answers still tripped it — e.g. "The
+ * guide says to wait a few minutes and try again later." (57 chars) was thrown
+ * as a NotebookLM error, and "The API returns 429 when the rate limit exceeded
+ * threshold is hit." was reported to the user as their daily quota.
+ */
+function bannerMatches(text: string, snippets: readonly string[]): boolean {
   if (!bannerShaped(text)) return false;
   const body = bannerBody(text);
-  return ERROR_SNIPPETS.some((s) => body === s || body.startsWith(s) || body.includes(s));
+  return snippets.some((s) => body === s || body.startsWith(s));
+}
+
+function isErrorMessage(text: string): boolean {
+  return bannerMatches(text, ERROR_SNIPPETS);
 }
 
 function isRateLimitText(text: string): boolean {
-  if (!bannerShaped(text)) return false;
-  const body = bannerBody(text);
-  return RATE_LIMIT_MESSAGES.some((s) => body === s || body.startsWith(s) || body.includes(s));
+  return bannerMatches(text, RATE_LIMIT_MESSAGES);
 }
 
 /**
@@ -265,11 +276,14 @@ export interface AskOptions {
   ignoreTexts?: string[];
   /**
    * How many answer containers existed before the question was submitted.
-   * When the page grows past this, the newest container is this turn's answer
-   * regardless of what it says — which is the only way to accept an answer
-   * that happens to be identical to an earlier one.
+   *
+   * REQUIRED: the whole "read this turn's own container" rule — the only thing
+   * that lets an answer identical to an earlier one be accepted, and the only
+   * thing that stops an older container being read — exists solely when this is
+   * supplied. Optional, it could be dropped by a future caller and the
+   * identical-answer hang would come back silently, so tsc enforces it.
    */
-  priorAnswerCount?: number;
+  priorAnswerCount: number;
   /** How many consecutive identical polls count as "answer settled". Default 3. */
   stablePolls?: number;
 }
@@ -343,7 +357,7 @@ export async function countAnswerContainers(page: Page): Promise<number> {
  */
 export async function waitForStableAnswer(
   page: Page,
-  options: AskOptions = {}
+  options: AskOptions
 ): Promise<string | null> {
   const {
     question = "",
@@ -354,12 +368,13 @@ export async function waitForStableAnswer(
     stablePolls = 3,
   } = options;
 
+
   const deadline = Date.now() + timeoutMs;
   const echoLower = question.trim().toLowerCase();
   // Ignore-list keys hold BOTH the raw snapshot text and its sanitised form.
   // `snapshotPriorAnswers` now sanitises, but the legacy fallback snapshot in
   // browser-session.ts still hands over raw `innerText`, and only a sanitised
-  // key can ever equal a candidate coming out of `readLatestAnswer`.
+  // key can ever equal a candidate coming out of `readAnswerTexts`.
   const ignoreKeys = new Set<string>();
   for (const text of ignoreTexts) {
     const raw = answerKey(text);
@@ -400,15 +415,27 @@ export async function waitForStableAnswer(
     let candidate: string | null = null;
     let candidateIsNewTurn = false;
 
-    if (priorAnswerCount !== undefined && texts.length > priorAnswerCount) {
-      // A container appeared for THIS turn. Read that container specifically —
-      // never an older one — so an answer identical to an earlier one is still
-      // recognised, and a not-yet-painted container never resolves to stale
-      // text. While it is empty we simply keep waiting.
-      const own = texts[texts.length - 1] ?? "";
-      if (own.length > 0) {
-        candidate = own;
-        candidateIsNewTurn = true;
+    if (texts.length > priorAnswerCount) {
+      // At least one container appeared for THIS turn. Look ONLY within this
+      // turn's containers (index >= priorAnswerCount):
+      //  - never an older one, so an answer identical to an earlier one is
+      //    still recognised as this turn's and stale text can never be
+      //    substituted;
+      //  - last non-empty rather than strictly the last, so a trailing empty
+      //    container (a suggestions block, or the answer's own container
+      //    before it paints) does not stall the wait.
+      // While every new container is still empty we simply keep waiting.
+      // LONGEST non-empty wins, not simply the last: a trailing block that
+      // paints before the answer (suggestions, actions) would otherwise be
+      // taken as the answer, and an answer element that is still empty would
+      // otherwise stall the wait. Bounded to indices >= priorAnswerCount, so an
+      // older container can never be read whatever it contains.
+      for (let i = priorAnswerCount; i < texts.length; i++) {
+        const own = texts[i] ?? "";
+        if (own.length > (candidate?.length ?? 0)) {
+          candidate = own;
+          candidateIsNewTurn = true;
+        }
       }
     } else {
       // No prior count (or none appeared yet): fall back to the last container
@@ -448,9 +475,11 @@ export async function waitForStableAnswer(
         // Rate limit is tested first: a quota banner often also contains
         // "try again later", which is an ERROR_SNIPPETS phrase.
         if (isRateLimitText(candidate)) {
-          throw new RateLimitError(
-            `NotebookLM rate limit reached (50 queries/day for free accounts): ${banner(candidate)}`
-          );
+          // Do NOT assert a specific quota here: the banner text is the only
+          // evidence, the limit differs by plan (a Google AI Pro account is
+          // ~5x the free tier), and telling a Pro user they hit "50/day" sends
+          // them to re-authenticate for no reason. Report what NotebookLM said.
+          throw new RateLimitError(`NotebookLM reported a usage limit: ${banner(candidate)}`);
         }
         if (isErrorMessage(candidate)) {
           throw new Error(`NotebookLM returned an error: ${banner(candidate)}`);
