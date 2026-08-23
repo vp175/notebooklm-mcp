@@ -24,6 +24,48 @@ export const systemTools: Tool[] = [
       type: "object",
       properties: {},
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        success: { type: "boolean" },
+        data: {
+          type: "object",
+          properties: {
+            status: { type: "string" },
+            authenticated: { type: "boolean" },
+            notebook_url: { type: "string" },
+            active_notebook_id: { type: ["string", "null"] },
+            active_notebook_name: { type: ["string", "null"] },
+            total_notebooks: { type: "number" },
+            active_sessions: { type: "number" },
+            max_sessions: { type: "number" },
+            session_timeout: { type: "number" },
+            total_messages: { type: "number" },
+            headless: { type: "boolean" },
+            auto_login_enabled: { type: "boolean" },
+            stealth_enabled: { type: "boolean" },
+            troubleshooting_tip: { type: "string" },
+          },
+          required: [
+            "status",
+            "authenticated",
+            "notebook_url",
+            "active_notebook_id",
+            "active_notebook_name",
+            "total_notebooks",
+            "active_sessions",
+            "max_sessions",
+            "session_timeout",
+            "total_messages",
+            "headless",
+            "auto_login_enabled",
+            "stealth_enabled",
+          ],
+        },
+        error: { type: "string" },
+      },
+      required: ["success", "data"],
+    },
     annotations: {
       title: "Get server health",
       readOnlyHint: true,
@@ -120,9 +162,16 @@ export const systemTools: Tool[] = [
       "(Linux/macOS/Windows). Always close all Chrome/Chromium instances " +
       "first — open browsers can lock files.\n\n" +
       "Phase 1 (preview): call with `confirm: false`. Returns a categorised " +
-      "list of paths and total size. **No deletion happens.**\n" +
+      "list of paths and total size. **With a client that does NOT support " +
+      "elicitation, this is preview-only — no deletion happens.** " +
+      "**With an elicitation-capable client, `confirm: false` also triggers " +
+      "a confirmation prompt on the client side: declining it (or the " +
+      "request failing/timing out) still results in preview-only, but " +
+      "ACCEPTING it performs the deletion immediately — even though " +
+      "`confirm` was passed as `false`.**\n" +
       "Phase 2 (delete): after the user reviews the preview and approves, " +
-      "call with `confirm: true`.\n\n" +
+      "call with `confirm: true`. This always deletes, with no elicitation " +
+      "step.\n\n" +
       "Set `preserve_library: true` to keep the notebook library file " +
       "(library.json) while wiping everything else — recommended when " +
       "troubleshooting auth.\n\n" +
@@ -136,8 +185,10 @@ export const systemTools: Tool[] = [
         confirm: {
           type: "boolean",
           description:
-            "false = preview only (default). true = actually delete after " +
-            "user reviewed the preview.",
+            "false (default) = preview only for a client without " +
+            "elicitation; for an elicitation-capable client, accepting the " +
+            "resulting confirmation prompt deletes immediately regardless " +
+            "of this being false. true = always deletes, no elicitation.",
         },
         preserve_library: {
           type: "boolean",

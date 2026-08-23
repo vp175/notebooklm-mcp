@@ -45,3 +45,28 @@ export class AuthenticationError extends Error {
     }
   }
 }
+
+/**
+ * Error thrown by the `elicit` callback (wired in index.ts) specifically when
+ * the client HAS declared the `elicitation` capability but the underlying
+ * `server.elicitInput()` request itself failed — rejected, errored, or (most
+ * commonly) timed out waiting for a human to answer the confirmation dialog.
+ *
+ * This is distinct from the "capability not declared" case, which the
+ * callback signals by resolving to `undefined` rather than throwing. Callers
+ * that need fail-closed behavior on a failed confirmation (e.g.
+ * `remove_notebook`, a destructive tool) should catch this specific error
+ * type and refuse to proceed, rather than treating it the same as "elicitation
+ * unavailable, proceed as before".
+ */
+export class ElicitationRequestError extends Error {
+  constructor(message: string = "Elicitation request failed") {
+    super(message);
+    this.name = "ElicitationRequestError";
+
+    // Maintain proper stack trace for where error was thrown (V8 only)
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, ElicitationRequestError);
+    }
+  }
+}

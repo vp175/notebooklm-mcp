@@ -15,10 +15,12 @@ import type {
 } from "../library/types.js";
 import type { AddSourceResult } from "../notebooklm/sources.js";
 import type { AudioGenerationResult, DownloadAudioResult } from "../notebooklm/audio.js";
+import type { StudioOutputType } from "../notebooklm/studio-outputs.js";
+import { isStudioTypeImplemented, implementedStudioTypes } from "../notebooklm/studio-outputs.js";
 import { CONFIG, applyBrowserOptions, type BrowserOptions } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { AskQuestionResult, ToolResult, ProgressCallback } from "../types.js";
-import { RateLimitError } from "../errors.js";
+import { RateLimitError, ElicitationRequestError } from "../errors.js";
 import { CleanupManager } from "../utils/cleanup-manager.js";
 import { applyAiMarker, PROVENANCE } from "../utils/disclaimer.js";
 
@@ -39,6 +41,26 @@ function followUpReminderEnabled(): boolean {
 }
 
 /**
+ * Result of an elicitation request, or `undefined` when the client never
+ * declared the `elicitation` capability — callers must treat `undefined` the
+ * same as `this.elicit` not existing at all, i.e. fall through to
+ * pre-elicitation behavior rather than treating it as a decline.
+ *
+ * This is distinct from a *failed* request: if the capability WAS declared
+ * but the underlying `elicitInput` call itself rejected or timed out, the
+ * callback throws `ElicitationRequestError` instead of resolving to
+ * `undefined`. A caller that must fail closed when confirmation could not be
+ * obtained (e.g. `remove_notebook`, a destructive tool) needs to catch that
+ * specific error and refuse to proceed — letting it collapse to `undefined`
+ * would silently proceed unconfirmed.
+ */
+type ElicitResult = { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> };
+type ElicitCallback = (
+  message: string,
+  schema: Record<string, unknown>
+) => Promise<ElicitResult | undefined>;
+
+/**
  * MCP Tool Handlers
  */
 export class ToolHandlers {
@@ -46,7 +68,12 @@ export class ToolHandlers {
   private authManager: AuthManager;
   private library: NotebookLibrary;
 
-  constructor(sessionManager: SessionManager, authManager: AuthManager, library: NotebookLibrary) {
+  constructor(
+    sessionManager: SessionManager,
+    authManager: AuthManager,
+    library: NotebookLibrary,
+    private readonly elicit?: ElicitCallback
+  ) {
     this.sessionManager = sessionManager;
     this.authManager = authManager;
     this.library = library;
@@ -761,6 +788,48 @@ export class ToolHandlers {
         };
       }
 
+      if (this.elicit) {
+        let confirmation: ElicitResult | undefined;
+        try {
+          confirmation = await this.elicit(
+            `Remove notebook "${notebook.name}" (${notebook.id}) from your local library? This does not delete the notebook on NotebookLM itself — only the local library entry.`,
+            {
+              type: "object",
+              properties: { confirmed: { type: "boolean" } },
+              required: ["confirmed"],
+            }
+          );
+        } catch (error) {
+          if (error instanceof ElicitationRequestError) {
+            // Capability WAS declared, but the confirmation request itself
+            // failed or timed out (the human never got to answer). Fail
+            // closed — do NOT fall through to an unconfirmed removal. This is
+            // distinct from the capability-not-declared case below, which
+            // resolves to `undefined` rather than throwing and legitimately
+            // proceeds unconfirmed.
+            log.warning(
+              `  ⚠️  [TOOL] remove_notebook: confirmation request failed/timed out — not removing`
+            );
+            return {
+              success: false,
+              error: `Could not confirm removal: the confirmation request failed or timed out before receiving a response. Notebook "${notebook.name}" (${notebook.id}) was NOT removed.`,
+            };
+          }
+          throw error;
+        }
+        // `confirmation` is `undefined` when elicitation isn't usable for this
+        // client because the capability was never declared — that is NOT a
+        // decline, it means fall through unchanged, exactly as if
+        // this.elicit didn't exist.
+        if (
+          confirmation &&
+          (confirmation.action !== "accept" || confirmation.content?.confirmed !== true)
+        ) {
+          log.info(`  ℹ️  remove_notebook declined via elicitation`);
+          return { success: false, error: "Removal declined by user." };
+        }
+      }
+
       const removed = this.library.removeNotebook(args.id);
       if (removed) {
         const closedSessions = await this.sessionManager.closeSessionsForNotebook(notebook.url);
@@ -887,6 +956,66 @@ export class ToolHandlers {
         );
         log.info(`  Platform: ${platformInfo.platform}`);
 
+        if (this.elicit) {
+          let confirmation: ElicitResult | undefined;
+          try {
+            confirmation = await this.elicit(
+              `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)} ` +
+                `(auth state, browser profile, and optionally the notebook library)? This cannot be undone.`,
+              {
+                type: "object",
+                properties: { confirmed: { type: "boolean" } },
+                required: ["confirmed"],
+              }
+            );
+          } catch (error) {
+            // Capability WAS declared, but the confirmation request itself
+            // failed or timed out (typically `ElicitationRequestError`, but
+            // any thrown error from this call is handled the same way).
+            // Unlike remove_notebook, there is nothing unsafe about falling
+            // through here: this is the preview branch, no deletion has
+            // happened or is about to happen, and `preview` was already
+            // computed above. Treat this exactly like the
+            // capability-not-declared case (`confirmation` stays
+            // `undefined`) and return the normal preview payload rather
+            // than discarding it behind an opaque error.
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            log.warning(
+              `  ⚠️  [TOOL] cleanup_data: confirmation request failed/timed out (${errorMessage}) — returning preview only`
+            );
+            confirmation = undefined;
+          }
+          // `confirmation` is `undefined` when elicitation isn't usable for
+          // this client — fall through to the preview-only return below,
+          // exactly as if this.elicit didn't exist.
+          if (
+            confirmation &&
+            confirmation.action === "accept" &&
+            confirmation.content?.confirmed === true
+          ) {
+            const result = await cleanupManager.performCleanup(mode, preserve_library);
+            log.success(
+              `✅ [TOOL] cleanup_data completed via elicitation - deleted ${result.deletedPaths.length} items`
+            );
+            return {
+              success: result.success,
+              data: {
+                status: result.success ? "completed" : "partial",
+                mode,
+                result: {
+                  deletedPaths: result.deletedPaths,
+                  failedPaths: result.failedPaths,
+                  totalSizeBytes: result.totalSizeBytes,
+                  categorySummary: result.categorySummary,
+                },
+              },
+            };
+          }
+          if (confirmation) {
+            log.info(`  ℹ️  cleanup_data declined via elicitation — returning preview only`);
+          }
+        }
+
         return {
           success: true,
           data: {
@@ -953,6 +1082,22 @@ export class ToolHandlers {
     }
     const active = this.library.getActiveNotebook();
     return active?.url;
+  }
+
+  /**
+   * Build the same "not yet implemented (Phase 2)" message `getStrategy()`
+   * throws inside `studio-outputs.ts`, so the four Studio-output handlers can
+   * surface it up front — before `resolveNotebookUrl`/`getOrCreateSession`
+   * launch a browser — instead of only reaching it deep inside a live
+   * session (where an unauthenticated/no-notebook caller would instead see
+   * "Notebook URL is required to create a session" for every type,
+   * implemented or not).
+   */
+  private studioTypeNotImplementedError(type: StudioOutputType): string {
+    return (
+      `Studio output type "${type}" is not yet implemented by this server (Phase 2). ` +
+      `Implemented types: ${implementedStudioTypes().join(", ")}.`
+    );
   }
 
   /**
@@ -1029,9 +1174,7 @@ export class ToolHandlers {
       // `started` and `in_progress` count as success — the generation is on
       // its way; the caller polls `get_audio_status` for completion.
       const ok =
-        result.status === "ready" ||
-        result.status === "started" ||
-        result.status === "in_progress";
+        result.status === "ready" || result.status === "started" || result.status === "in_progress";
       return { success: ok, data: { result } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -1103,6 +1246,178 @@ export class ToolHandlers {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] download_audio failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle generate_studio_output tool (Task 7) — generic trigger for any
+   * registered Studio output type.
+   */
+  async handleGenerateStudioOutput(args: {
+    output_type: StudioOutputType;
+    custom_prompt?: string;
+    difficulty?: string;
+    timeout_ms?: number;
+    wait_for_completion?: boolean;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+    log.info(`🔧 [TOOL] generate_studio_output called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] generate_studio_output failed: ${error}`);
+      return { success: false, error };
+    }
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.generateStudioOutput(args.output_type, {
+        customPrompt: args.custom_prompt,
+        difficulty: args.difficulty,
+        timeoutMs: args.timeout_ms,
+        waitForCompletion: args.wait_for_completion ?? false,
+      });
+      const ok =
+        result.status === "ready" || result.status === "started" || result.status === "in_progress";
+      return { success: ok, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] generate_studio_output failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle get_studio_output_status tool (Task 7) — non-blocking poll for
+   * any registered Studio output type.
+   */
+  async handleGetStudioOutputStatus(args: {
+    output_type: StudioOutputType;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+    log.info(`🔧 [TOOL] get_studio_output_status called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] get_studio_output_status failed: ${error}`);
+      return { success: false, error };
+    }
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.getStudioOutputStatus(args.output_type);
+      return { success: true, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] get_studio_output_status failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle download_studio_output tool (Task 7) — save a completed
+   * file-kind Studio output to disk.
+   */
+  async handleDownloadStudioOutput(args: {
+    output_type: StudioOutputType;
+    destination_dir: string;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: DownloadAudioResult }>> {
+    log.info(`🔧 [TOOL] download_studio_output called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] download_studio_output failed: ${error}`);
+      return { success: false, error };
+    }
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.downloadStudioOutput(args.output_type, args.destination_dir);
+      return { success: result.success, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] download_studio_output failed: ${msg}`);
+      return { success: false, error: msg };
+    } finally {
+      Object.assign(CONFIG, originalConfig);
+    }
+  }
+
+  /**
+   * Handle get_studio_output_content tool (Task 7) — extract a completed
+   * structured-kind Studio output as JSON.
+   */
+  async handleGetStudioOutputContent(args: {
+    output_type: StudioOutputType;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+  }): Promise<ToolResult<{ result: { success: boolean; content?: unknown; message?: string } }>> {
+    log.info(`🔧 [TOOL] get_studio_output_content called (type=${args.output_type})`);
+    if (!isStudioTypeImplemented(args.output_type)) {
+      const error = this.studioTypeNotImplementedError(args.output_type);
+      log.error(`❌ [TOOL] get_studio_output_content failed: ${error}`);
+      return { success: false, error };
+    }
+    const originalConfig = { ...CONFIG };
+    if (args.show_browser !== undefined) {
+      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
+    }
+    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
+    try {
+      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const session = await this.sessionManager.getOrCreateSession(
+        args.session_id,
+        url,
+        overrideHeadless
+      );
+      const result = await session.getStudioOutputContent(args.output_type);
+      return { success: result.success, data: { result } };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] get_studio_output_content failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
       Object.assign(CONFIG, originalConfig);

@@ -1,8 +1,8 @@
 # Tools
 
-Every tool registered in v2.0.0, with parameter schema, an example invocation (MCP `tools/call` arguments shape), and the expected return shape. New v2 tools are flagged.
+This is a fork of notebooklm-mcp. It registers 24 tools total: the 20 tools from upstream v2.0.0, plus 4 new generic Studio-output tools added in this fork's Phase 1 protocol upgrade. Each entry below has parameter schema, an example invocation (MCP `tools/call` arguments shape), and the expected return shape. New-in-this-fork tools are flagged.
 
-The server returns each tool result wrapped as `{ "success": true, "data": <object> }` (or `{ "success": false, "error": <string> }`). The shapes below describe the inner `data`.
+The server returns each tool result wrapped as `{ "success": true, "data": <object> }` (or `{ "success": false, "error": <string> }`). The shapes below describe the inner `data` — except the audio and Studio-output sections, which show the full envelope explicitly since their `data.result` nesting is easy to get wrong.
 
 ---
 
@@ -114,14 +114,18 @@ Add a source to a notebook. v2 supports `type=url` (web crawl) and `type=text` (
 
 ## generate_audio — new in v2
 
-Generate a podcast-style Audio Overview for a notebook. Resolves when the audio element is ready.
+Generate a podcast-style Audio Overview for a notebook. **Async by default** — returns immediately; poll `get_audio_status` for completion, or pass `wait_for_completion: true` to block.
+
+Equivalent to `generate_studio_output` with `output_type: "audio"` — kept as a dedicated tool for backward compatibility.
 
 ### Parameters
 
 | Name | Type | Required | Notes |
 |---|---|---|---|
 | `custom_prompt` | string | no | Optional focus prompt. |
-| `timeout_ms` | number | no | Wait ceiling. Default `600000`. |
+| `wait_for_completion` | boolean | no | Block until ready (up to `timeout_ms`). Default `false`. |
+| `timeout_ms` | number | no | Only relevant when `wait_for_completion=true`. Default `600000`. |
+| `show_browser` | boolean | no | Show the browser window for debugging. Default `false`. |
 | `session_id` | string | no | |
 | `notebook_id` | string | no | |
 | `notebook_url` | string | no | |
@@ -142,25 +146,72 @@ Generate a podcast-style Audio Overview for a notebook. Resolves when the audio 
 
 ```jsonc
 {
-  "status": "success",
-  "ready": true,
-  "duration_ms": 412000
+  "success": true,
+  "data": {
+    "result": {
+      "status": "started", // or "in_progress" | "ready" | "error"
+      "alreadyExisted": false, // true when status="ready" and nothing was triggered
+      "message": "..." // present on in_progress / error
+    }
+  }
 }
 ```
 
-Pair with `download_audio` to persist the file. Video / Infographic / Slides are not in v2.0.0.
+Pair with `get_audio_status` (poll) and `download_audio` (persist) to complete the workflow. Audio Overview is the only Studio output this server currently implements — see [`generate_studio_output`](#generate_studio_output--new-in-this-fork) below for the Phase 1/2 boundary on the other 8 output types.
+
+---
+
+## get_audio_status — new in v2
+
+Non-blocking probe for the current Audio Overview state of a notebook. Was previously undocumented here despite being registered since v2.0.0.
+
+Equivalent to `get_studio_output_status` with `output_type: "audio"` — kept as a dedicated tool for backward compatibility.
+
+### Parameters
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `show_browser` | boolean | no | Show the browser window for debugging. Default `false`. |
+| `session_id` | string | no | |
+| `notebook_id` | string | no | |
+| `notebook_url` | string | no | |
+
+### Example
+
+```json
+{
+  "name": "get_audio_status",
+  "arguments": {}
+}
+```
+
+### Return shape
+
+```jsonc
+{
+  "success": true,
+  "data": {
+    "result": {
+      "status": "ready" // or "in_progress" | "not_started"
+    }
+  }
+}
+```
 
 ---
 
 ## download_audio — new in v2
 
-Download the most recent Audio Overview to disk.
+Download the most recent Audio Overview to disk as a `.m4a` file. **Precondition:** `get_audio_status` must report `status: "ready"`.
+
+Equivalent to `download_studio_output` with `output_type: "audio"` — kept as a dedicated tool for backward compatibility.
 
 ### Parameters
 
 | Name | Type | Required | Notes |
 |---|---|---|---|
 | `destination_dir` | string | yes | Absolute directory. Created if missing. |
+| `show_browser` | boolean | no | Show the browser window for debugging. Default `false`. |
 | `session_id` | string | no | |
 | `notebook_id` | string | no | |
 | `notebook_url` | string | no | |
@@ -180,13 +231,125 @@ Download the most recent Audio Overview to disk.
 
 ```jsonc
 {
-  "status": "success",
-  "file_path": "/Users/me/Downloads/notebooklm/overview-2026-04-30.wav",
-  "size_bytes": 9_412_000
+  "success": true,
+  "data": {
+    "result": {
+      "success": true,
+      "filePath": "/Users/me/Downloads/notebooklm/overview-2026-04-30.m4a"
+    }
+  }
 }
 ```
 
 Run `generate_audio` first if no Audio Overview exists yet.
+
+---
+
+## generate_studio_output — new in this fork
+
+Generic trigger for any of the 9 `StudioOutputType` values. **Async by default**, same status semantics as `generate_audio`. **Only `output_type: "audio"` is backed by a live strategy** — every other value (`video`, `report`, `slides`, `infographic`, `mindmap`, `datatable`, `quiz`, `flashcards`) returns an error: `Studio output type "<type>" is not yet implemented by this server (Phase 2). Implemented types: audio.`
+
+### Parameters
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `output_type` | string | yes | One of `audio`, `video`, `report`, `slides`, `infographic`, `mindmap`, `datatable`, `quiz`, `flashcards`. |
+| `custom_prompt` | string | no | Optional focus prompt. |
+| `difficulty` | string | no | Only used by quiz/flashcards (Phase 2 — currently ignored since neither is implemented). |
+| `wait_for_completion` | boolean | no | Block until ready (up to `timeout_ms`). Default `false`. |
+| `timeout_ms` | number | no | Default `600000`. |
+| `show_browser` | boolean | no | |
+| `session_id` / `notebook_id` / `notebook_url` | string | no | |
+
+### Example
+
+```json
+{
+  "name": "generate_studio_output",
+  "arguments": { "output_type": "audio" }
+}
+```
+
+### Return shape
+
+Same shape as `generate_audio` above, wrapped under `data.result`.
+
+---
+
+## get_studio_output_status — new in this fork
+
+Non-blocking status probe for any `output_type`. Read-only (`readOnlyHint: true`) — included in the `standard` profile.
+
+### Parameters
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `output_type` | string | yes | Same 9-value enum as above. |
+| `show_browser` | boolean | no | |
+| `session_id` / `notebook_id` / `notebook_url` | string | no | |
+
+### Return shape
+
+```jsonc
+{
+  "success": true,
+  "data": {
+    "result": {
+      "status": "ready" // or "in_progress" | "not_started" | "started" | "error"
+    }
+  }
+}
+```
+
+---
+
+## download_studio_output — new in this fork
+
+Save a completed **file-kind** output (`audio`, `video`, `report`, `slides`, `infographic`) to disk. For structured kinds use `get_studio_output_content` instead. **Precondition:** `get_studio_output_status` must report `ready`.
+
+### Parameters
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `output_type` | string | yes | One of `audio`, `video`, `report`, `slides`, `infographic`. |
+| `destination_dir` | string | yes | Absolute directory. Created if missing. |
+| `show_browser` | boolean | no | |
+| `session_id` / `notebook_id` / `notebook_url` | string | no | |
+
+### Return shape
+
+Same shape as `download_audio` above, wrapped under `data.result`.
+
+---
+
+## get_studio_output_content — new in this fork
+
+Extract a completed **structured-kind** output (`mindmap`, `datatable`, `quiz`, `flashcards`) as JSON. For file kinds use `download_studio_output` instead. **Precondition:** `get_studio_output_status` must report `ready`.
+
+### Parameters
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `output_type` | string | yes | One of `mindmap`, `datatable`, `quiz`, `flashcards`. |
+| `show_browser` | boolean | no | |
+| `session_id` / `notebook_id` / `notebook_url` | string | no | |
+
+### Return shape
+
+```jsonc
+{
+  "success": true,
+  "data": {
+    "result": {
+      "success": true,
+      "content": {}, // shape depends on output_type — not yet defined, none of these 4 types are implemented
+      "message": "..."
+    }
+  }
+}
+```
+
+None of the 4 structured kinds are implemented as of this fork — every call currently returns the Phase 2 "not yet implemented" error described under `generate_studio_output` above.
 
 ---
 
@@ -395,12 +558,17 @@ Categorised preview + delete of every NotebookLM MCP file the server can find on
 
 | Name | Type | Required | Notes |
 |---|---|---|---|
-| `confirm` | bool | yes | `false` = preview only. `true` = delete after preview was reviewed. |
+| `confirm` | bool | yes | See below — `false` is not always preview-only. `true` = always delete, no elicitation. |
 | `preserve_library` | bool | no | Keep `library.json` while wiping everything else. Default `false`. |
+
+`confirm: false` behavior depends on the connected client's capabilities:
+
+- **Client without elicitation support:** `confirm: false` is preview-only — no deletion happens.
+- **Elicitation-capable client:** `confirm: false` still returns the preview, but first triggers a client-side confirmation prompt. Declining that prompt (or the request failing/timing out) also results in preview-only, no deletion. **Accepting the prompt performs the deletion immediately, even though `confirm` was passed as `false`.**
 
 Workflow:
 
-1. `cleanup_data({ confirm: false, preserve_library: true })` — see what will be deleted.
+1. `cleanup_data({ confirm: false, preserve_library: true })` — see what will be deleted. (With an elicitation-capable client, accepting the confirmation prompt here deletes immediately instead of just previewing.)
 2. Close all Chrome instances.
 3. `cleanup_data({ confirm: true, preserve_library: true })` — execute.
 
@@ -415,3 +583,14 @@ Workflow:
 | `notebooklm://metadata` | Deprecated. Use `notebooklm://library` instead. |
 
 The MCP server does not respond to `mcp://notebooklm` — that URI scheme never existed. Use `notebooklm://`.
+
+---
+
+## Prompts
+
+| Name | Purpose |
+|---|---|
+| `notebooklm.auth-setup` | First-time authentication walkthrough: call `setup_auth`, then verify with `get_health`. |
+| `notebooklm.auth-repair` | Fix a broken session: call `re_auth`, then verify with `get_health`. |
+
+Neither prompt takes arguments. Both are referenced from `ask_question`'s description as the auth-recovery path.

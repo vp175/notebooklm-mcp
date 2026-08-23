@@ -23,6 +23,56 @@ export const sessionManagementTools: Tool[] = [
       type: "object",
       properties: {},
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        success: { type: "boolean" },
+        data: {
+          type: "object",
+          properties: {
+            active_sessions: { type: "number" },
+            max_sessions: { type: "number" },
+            session_timeout: { type: "number" },
+            oldest_session_seconds: { type: "number" },
+            total_messages: { type: "number" },
+            sessions: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  created_at: { type: "number" },
+                  last_activity: { type: "number" },
+                  age_seconds: { type: "number" },
+                  inactive_seconds: { type: "number" },
+                  message_count: { type: "number" },
+                  notebook_url: { type: "string" },
+                },
+                required: [
+                  "id",
+                  "created_at",
+                  "last_activity",
+                  "age_seconds",
+                  "inactive_seconds",
+                  "message_count",
+                  "notebook_url",
+                ],
+              },
+            },
+          },
+          required: [
+            "active_sessions",
+            "max_sessions",
+            "session_timeout",
+            "oldest_session_seconds",
+            "total_messages",
+            "sessions",
+          ],
+        },
+        error: { type: "string" },
+      },
+      required: ["success", "data"],
+    },
     annotations: {
       title: "List sessions",
       readOnlyHint: true,

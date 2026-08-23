@@ -46,7 +46,7 @@ export const addSourceTool: Tool = {
     "subsequent `ask_question` calls then have the new source in context. " +
     "Free notebooks cap at 50 sources.\n\n" +
     "Known quirk: pasted-text uploads occasionally redirect to a freshly " +
-    "created \"Untitled notebook\" on Google's side. The tool detects this " +
+    'created "Untitled notebook" on Google\'s side. The tool detects this ' +
     "and returns a clear error so you can re-try against the correct URL.",
   inputSchema: {
     type: "object",
@@ -94,10 +94,10 @@ export const generateAudioTool: Tool = {
   description:
     "Trigger podcast-style Audio Overview generation for a notebook.\n\n" +
     "**Async by default** — returns immediately with one of:\n" +
-    "  • `status: \"started\"` — generation just kicked off\n" +
-    "  • `status: \"in_progress\"` — a generation was already running; " +
+    '  • `status: "started"` — generation just kicked off\n' +
+    '  • `status: "in_progress"` — a generation was already running; ' +
     "this call attached to it\n" +
-    "  • `status: \"ready\"` (with `alreadyExisted: true`) — an Audio " +
+    '  • `status: "ready"` (with `alreadyExisted: true`) — an Audio ' +
     "Overview already existed; nothing was triggered\n\n" +
     "Generation typically takes 2–10 minutes. **Workflow:**\n" +
     "  1. `generate_audio` → returns immediately\n" +
@@ -106,16 +106,24 @@ export const generateAudioTool: Tool = {
     "Pass `wait_for_completion: true` for legacy synchronous behaviour " +
     "(blocks for up to `timeout_ms`). Audio Overview is the only Studio " +
     "output exposed in v2.0 (Video / Mindmap / Quiz / Infographic / " +
-    "Datatable / Presentation are NotebookLM features but not yet wrapped).",
+    "Datatable / Presentation are NotebookLM features but not yet wrapped).\n\n" +
+    'Equivalent to `generate_studio_output` with `output_type: "audio"` — ' +
+    "kept as a dedicated tool for backward compatibility. The other 8 " +
+    "Studio output types (video, report, slides, infographic, mindmap, " +
+    "datatable, quiz, flashcards) are recognised by the generic " +
+    "`generate_studio_output` / `get_studio_output_status` / " +
+    "`download_studio_output` / `get_studio_output_content` tools' schemas, " +
+    "but none are implemented yet — calling any of them returns a clear " +
+    '"not yet implemented" error (Phase 2).',
   inputSchema: {
     type: "object",
     properties: {
       custom_prompt: {
         type: "string",
         description:
-          "Optional focus prompt for the Audio Overview, e.g. \"Focus on the " +
-          "API authentication flow and skip pricing\". Passed into the " +
-          "NotebookLM \"Customize\" sub-dialog before generation starts.",
+          'Optional focus prompt for the Audio Overview, e.g. "Focus on the ' +
+          'API authentication flow and skip pricing". Passed into the ' +
+          'NotebookLM "Customize" sub-dialog before generation starts.',
       },
       wait_for_completion: {
         type: "boolean",
@@ -156,7 +164,12 @@ export const getAudioStatusTool: Tool = {
     "  • `not_started` — no Audio Overview exists yet for this notebook\n\n" +
     "Safe to poll every ~30 s while waiting for `generate_audio` to finish. " +
     "When status flips to `ready`, call `download_audio` with a destination " +
-    "directory.",
+    "directory.\n\n" +
+    'Equivalent to `get_studio_output_status` with `output_type: "audio"` ' +
+    "— kept as a dedicated tool for backward compatibility. The generic " +
+    "`get_studio_output_status` tool accepts the other 8 Studio output " +
+    "types by schema, but none are implemented yet — calling it with any " +
+    'of them returns a clear "not yet implemented" error (Phase 2).',
   inputSchema: {
     type: "object",
     properties: {
@@ -178,12 +191,18 @@ export const downloadAudioTool: Tool = {
   name: "download_audio",
   description:
     "Save the completed Audio Overview to disk as a `.m4a` file. **Pre-" +
-    "condition:** `get_audio_status` must report `status: \"ready\"`. " +
+    'condition:** `get_audio_status` must report `status: "ready"`. ' +
     "Calling this before generation completes returns an error message " +
     "explaining what to do.\n\n" +
     "The file lands in `destination_dir` with NotebookLM's suggested " +
     "filename (sanitised — usually the audio's title with underscores). " +
-    "The full saved path is returned in `result.filePath`.",
+    "The full saved path is returned in `result.filePath`.\n\n" +
+    'Equivalent to `download_studio_output` with `output_type: "audio"` — ' +
+    "kept as a dedicated tool for backward compatibility. The other " +
+    "file-kind Studio output types (video, report, slides, infographic) " +
+    "are recognised by the generic `download_studio_output` tool's " +
+    "schema, but none are implemented yet — calling it with any of them " +
+    'returns a clear "not yet implemented" error (Phase 2).',
   inputSchema: {
     type: "object",
     properties: {

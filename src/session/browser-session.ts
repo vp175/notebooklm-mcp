@@ -37,6 +37,13 @@ import {
   type AudioGenerationResult,
   type DownloadAudioResult,
 } from "../notebooklm/audio.js";
+import {
+  generateStudioOutput,
+  getStudioOutputStatus,
+  downloadStudioOutput,
+  getStudioOutputContent,
+  type StudioOutputType,
+} from "../notebooklm/studio-outputs.js";
 import { CONFIG } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { SessionInfo, ProgressCallback } from "../types.js";
@@ -211,6 +218,38 @@ export class BrowserSession {
       return false;
     } catch {
       return true;
+    }
+  }
+
+  /**
+   * Runs `fn` once; if it fails with a closed-page/context error, reinitialises
+   * the session and retries `fn` exactly once. Shared by every method that
+   * touches `this.page`, so page/context loss is recovered from consistently
+   * instead of each caller reimplementing the same regex + reinit + retry.
+   */
+  private async withRecovery<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (/has been closed|Target .* closed|Browser has been closed|Context .* closed/i.test(msg)) {
+        log.warning(
+          `  ♻️  Detected closed page/context during ${label}. Recovering session and retrying...`
+        );
+        this.initialized = false;
+        if (this.page) {
+          try {
+            await this.page.close();
+          } catch {
+            /* page already gone */
+          }
+        }
+        this.page = null;
+        await this.init();
+        return await fn();
+      }
+      log.error(`❌ [${this.sessionId}] Failed during ${label}: ${msg}`);
+      throw error;
     }
   }
 
@@ -453,32 +492,7 @@ export class BrowserSession {
       return answer;
     };
 
-    try {
-      return await askOnce();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (/has been closed|Target .* closed|Browser has been closed|Context .* closed/i.test(msg)) {
-        log.warning(`  ♻️  Detected closed page/context. Recovering session and retrying ask...`);
-        try {
-          this.initialized = false;
-          if (this.page) {
-            try {
-              await this.page.close();
-            } catch {
-              /* page already gone */
-            }
-          }
-          this.page = null;
-          await this.init();
-          return await askOnce();
-        } catch (e2) {
-          log.error(`❌ Recovery failed: ${e2}`);
-          throw e2;
-        }
-      }
-      log.error(`❌ [${this.sessionId}] Failed to ask question: ${msg}`);
-      throw error;
-    }
+    return this.withRecovery("ask", askOnce);
   }
 
   /**
@@ -500,7 +514,7 @@ export class BrowserSession {
     if (!this.initialized || !this.page || this.isPageClosedSafe()) {
       await this.init();
     }
-    return await generateAudioOnPage(this.page!, options);
+    return this.withRecovery("generateAudio", () => generateAudioOnPage(this.page!, options));
   }
 
   /**
@@ -510,7 +524,7 @@ export class BrowserSession {
     if (!this.initialized || !this.page || this.isPageClosedSafe()) {
       await this.init();
     }
-    return await getAudioStatusOnPage(this.page!);
+    return this.withRecovery("getAudioStatus", () => getAudioStatusOnPage(this.page!));
   }
 
   /**
@@ -520,7 +534,60 @@ export class BrowserSession {
     if (!this.initialized || !this.page || this.isPageClosedSafe()) {
       await this.init();
     }
-    return await downloadAudioOnPage(this.page!, destinationDir);
+    return this.withRecovery("downloadAudio", () =>
+      downloadAudioOnPage(this.page!, destinationDir)
+    );
+  }
+
+  /**
+   * Trigger generation of any registered Studio output type (Task 7). Thin
+   * pass-through onto the generic engine, mirroring the `generateAudio`
+   * pattern above but routed through `withRecovery` since this is new code
+   * added after `withRecovery` was extracted (Task 4).
+   */
+  async generateStudioOutput(
+    type: StudioOutputType,
+    options: GenerateAudioOptions & { difficulty?: string } = {}
+  ): Promise<AudioGenerationResult> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("generateStudioOutput", () =>
+      generateStudioOutput(this.page!, type, options)
+    );
+  }
+
+  /**
+   * Non-blocking probe for any registered Studio output type (Task 7).
+   */
+  async getStudioOutputStatus(type: StudioOutputType): Promise<AudioGenerationResult> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("getStudioOutputStatus", () =>
+      getStudioOutputStatus(this.page!, type)
+    );
+  }
+
+  /**
+   * Download a completed file-kind Studio output (Task 7).
+   */
+  async downloadStudioOutput(
+    type: StudioOutputType,
+    destinationDir: string
+  ): Promise<DownloadAudioResult> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("downloadStudioOutput", () =>
+      downloadStudioOutput(this.page!, type, destinationDir)
+    );
+  }
+
+  /**
+   * Extract a completed structured-kind Studio output as JSON (Task 7).
+   */
+  async getStudioOutputContent(
+    type: StudioOutputType
+  ): Promise<{ success: boolean; content?: unknown; message?: string }> {
+    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    return this.withRecovery("getStudioOutputContent", () =>
+      getStudioOutputContent(this.page!, type)
+    );
   }
 
   /**
@@ -758,28 +825,7 @@ export class BrowserSession {
       log.success(`✅ [${this.sessionId}] Chat history reset`);
     };
 
-    try {
-      await resetOnce();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (/has been closed|Target .* closed|Browser has been closed|Context .* closed/i.test(msg)) {
-        log.warning(`  ♻️  Detected closed page/context during reset. Recovering and retrying...`);
-        this.initialized = false;
-        if (this.page) {
-          try {
-            await this.page.close();
-          } catch {
-            /* page already gone */
-          }
-        }
-        this.page = null;
-        await this.init();
-        await resetOnce();
-        return;
-      }
-      log.error(`❌ [${this.sessionId}] Failed to reset: ${msg}`);
-      throw error;
-    }
+    await this.withRecovery("reset", resetOnce);
   }
 
   /**

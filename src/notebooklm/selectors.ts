@@ -27,6 +27,21 @@
  * (DE, EN locales).
  */
 
+/**
+ * Material-Symbols icon anchor shared by every selector that needs to scope
+ * a match to Audio Overview's own tile/card (as opposed to any artifact
+ * tile). Declared as a module-level const — not a sibling property inside
+ * the `Selectors` object literal below — because a property initializer
+ * inside an object literal cannot reference another property of that same
+ * object while it is still being constructed; a module-level const is the
+ * only way to give this string a single source of truth that the
+ * `readySelectors`/`audioMoreMenuButton` entries can compose into their
+ * template strings instead of re-typing it inline. See
+ * `Selectors.studio.audioTileIconAnchor` below for the "unverified, revise
+ * after live recon" caveat this string carries.
+ */
+const AUDIO_TILE_ICON_ANCHOR = 'mat-icon:text-is("audio_magic_eraser")';
+
 export const Selectors = {
   chat: {
     answerContainer: ".to-user-container",
@@ -237,6 +252,49 @@ export const Selectors = {
 
   studio: {
     /**
+     * Tile-scoping icon anchor for Audio Overview specifically, intended to
+     * filter `artifact-library-item` down to audio's own tile instead of
+     * matching the first/any artifact once more Studio output types exist
+     * (Phase 2). Backed by the module-level `AUDIO_TILE_ICON_ANCHOR` const
+     * above — this property and the `readySelectors`/`audioMoreMenuButton`
+     * entries below all reference that single const rather than each
+     * re-typing the icon-name string.
+     *
+     * HYPOTHESIS, NOT LIVE-VERIFIED (Task 6, 2026-08-22): no authenticated
+     * NotebookLM account was available this session (`get_health` reports
+     * `authenticated: false` on both this fork and the live-connected
+     * server — see docs/superpowers/plans/2026-08-22-full-feature-protocol-
+     * upgrade.md "Execution Note"), so the planned live-DOM reconnaissance
+     * (does the completed tile redisplay its trigger's `audio_magic_eraser`
+     * icon as a badge?) could not run. This selector assumes it does,
+     * grounded only in this file's own documented anchor-priority
+     * convention (Material-Symbols icon names are the most stable,
+     * language-agnostic anchor — see file header). Re-verify against the
+     * live site once an authenticated account is available.
+     *
+     * CORRECTED (Task 6 review, 2026-08-22): being listed first in
+     * `readySelectors` does NOT give this anchor priority over the broad
+     * entries later in that same array. `readySelectors` is consumed as a
+     * single comma-joined CSS OR selector (`joinAlt(...)` + `.first()`, see
+     * `isReady`/`waitUntilReady` in studio-outputs.ts) — array position is
+     * irrelevant to a CSS OR; `.first()` returns whichever match comes
+     * first in DOM order regardless of which array entry matched it. That
+     * is exactly why this anchor cannot regress today's audio-only
+     * behavior (it's a harmless no-op today), but it is also why it will
+     * NEVER start discriminating between output types just by sitting
+     * earlier in the array. The broad `artifact-library-item:has(button.
+     * artifact-action-button)` / `.artifact-library-container
+     * artifact-library-item` entries in `readySelectors` MUST be actually
+     * REMOVED — not merely left as trailing "fallback" — once a second
+     * Studio output type is registered (Phase 2), or tile discrimination
+     * will silently fail (the second type's tile satisfies those broad
+     * selectors too). This anchor's behavior differs by consumer:
+     * `audioMoreMenuButton` (below) is read by `clickFirstVisible`, which
+     * IS an ordered loop — there, listing this anchor first genuinely does
+     * give it priority.
+     */
+    audioTileIconAnchor: AUDIO_TILE_ICON_ANCHOR,
+    /**
      * "Audio Overview" entry control. As of the 2026-05 Studio layout this
      * is a `<div role="button">` with a Material-Symbols `audio_magic_eraser`
      * icon, NOT a real `<button>`. Icon-anchored selectors fire first.
@@ -260,6 +318,22 @@ export const Selectors = {
       'button[aria-label*="audio overview" i]',
       'button[aria-label*="audio-zusammenfassung" i]',
       'button[aria-label*="podcast" i]',
+    ],
+    /**
+     * Per-card "Customise"/"Anpassen" button that opens the sub-dialog for
+     * supplying a focus prompt before generation. Moved here verbatim from
+     * `audio.ts`'s formerly-inlined `openAudioCustomiseDialog` selector
+     * array (Task 6) so `selectors.ts` remains the single source of truth
+     * for all Studio selectors, per this file's own convention.
+     */
+    audioCustomiseButton: [
+      'button[aria-label*="audio-zusammenfassung anpassen" i]',
+      'button[aria-label*="audio" i][aria-label*="anpassen" i]',
+      'button[aria-label*="customise audio" i]',
+      'button[aria-label*="customize audio" i]',
+      'button[aria-label*="personnaliser" i][aria-label*="audio" i]',
+      'button[aria-label*="personalizar" i][aria-label*="audio" i]',
+      'button[aria-label*="personalizza" i][aria-label*="audio" i]',
     ],
     /**
      * Generate / Generieren / Générer trigger inside the customise dialog.
@@ -302,6 +376,23 @@ export const Selectors = {
      * ready" signal because it only mounts after generation completes.
      */
     audioPlayer: [
+      // Tile-scoped icon anchor (Task 6) — see `audioTileIconAnchor` above
+      // for the hypothesis/fallback reasoning. NOTE: this array is consumed
+      // as `readySelectors` via `joinAlt(...)` + `.first()` (a single
+      // comma-joined CSS OR — see isReady/waitUntilReady in
+      // studio-outputs.ts), NOT via the ordered `clickFirstVisible` loop.
+      // Listing this anchor FIRST here is cosmetic only: a CSS OR gives no
+      // priority to array position, `.first()` just returns whichever
+      // match comes first in DOM order. It is harmless today only because
+      // the broad selectors below still match audio's own tile (audio is
+      // the only registered Studio output) — it will NOT start
+      // discriminating between output types merely by sitting earlier in
+      // this array. Once a second Studio output type is registered
+      // (Phase 2), the broad entries below MUST be removed (not just kept
+      // as trailing "fallback"), or this anchor's presence here is a no-op
+      // and discrimination silently fails.
+      `artifact-library-item:has(${AUDIO_TILE_ICON_ANCHOR}):has(button.artifact-action-button)`,
+      // Broad selectors (pre-Task-6, still the governing match today).
       "artifact-library-item:has(button.artifact-action-button)",
       ".artifact-library-container artifact-library-item",
       // Legacy <audio> tag for older builds.
@@ -313,7 +404,20 @@ export const Selectors = {
      * contains the Download item.
      */
     audioMoreMenuButton: [
-      "artifact-library-item button:has(mat-icon:text-is(\"more_vert\"))",
+      // Tile-scoped icon anchor (Task 6) — same live-verification caveat as
+      // `audioTileIconAnchor` above, but a DIFFERENT priority story than
+      // `audioPlayer`'s `readySelectors` array: this selector list is
+      // consumed by `clickFirstVisible` (studio-outputs.ts), which IS an
+      // ordered loop that tries each candidate in turn and clicks the first
+      // one that's visible. Listing this narrow anchor first genuinely does
+      // give it priority here — it is not the CSS-OR no-op that
+      // `readySelectors` is. The broad selectors below are kept as true
+      // fallbacks (used only if this anchor's candidate isn't visible), so
+      // behavior cannot regress if this narrower candidate never matches
+      // anything real.
+      `artifact-library-item:has(${AUDIO_TILE_ICON_ANCHOR}) button:has(mat-icon:text-is("more_vert"))`,
+      // Broad selectors (pre-Task-6, still the governing match today).
+      'artifact-library-item button:has(mat-icon:text-is("more_vert"))',
       'artifact-library-item button[aria-label*="mehr" i]',
       'artifact-library-item button[aria-label*="more" i]',
       'artifact-library-item button[aria-label*="plus" i]',

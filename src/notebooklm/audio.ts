@@ -1,7 +1,19 @@
 /**
- * NotebookLM Audio Overview generation + download (issue #11).
+ * Audio Overview strategy, registered into the Studio-output engine
+ * (studio-outputs.ts). Public functions below are thin wrappers kept for
+ * backward compatibility with existing callers (browser-session.ts,
+ * handlers.ts) — the actual trigger/poll/download logic now lives in the
+ * shared engine, with this file supplying only Audio's own selectors and
+ * DOM interactions.
  *
- * 2026-05 Studio UX (verified live in DE/EN locales):
+ * This file remains the source of truth for the shared result/option types
+ * (`AudioStatus`, `GenerateAudioOptions`, `AudioGenerationResult`,
+ * `DownloadAudioResult`) — `studio-outputs.ts` imports them as `import
+ * type` (erased at compile time, so there is no runtime circular-import
+ * concern even though `studio-outputs.ts` is itself imported here for the
+ * engine's functions).
+ *
+ * 2026-05 Studio UX (verified live in DE/EN locales, pre-Task-6):
  *   - The "Audio Overview" entry is a `<div role="button">` with a Material-
  *     Symbols `audio_magic_eraser` icon. *One click* on it kicks off
  *     generation; there is no separate "Generate" step unless the user
@@ -14,24 +26,40 @@
  *     "Download" / "Herunterladen" / "Télécharger" / …. There is *no real*
  *     `<audio>` element in the DOM.
  *
- * Two operations:
- *   - `generateAudioOverview(page, opts)` — async by default: returns
- *     immediately with `status: "started"` after triggering the generation,
- *     so the caller doesn't block for the 5–10 minute render. Pass
- *     `waitForCompletion: true` for the legacy synchronous behaviour.
- *   - `downloadAudioOverview(page, destDir)` — opens the three-dot menu on
- *     the completed audio tile, clicks the "Download" item, and persists
- *     the file via Patchright's `download` event.
+ * Task 6 (2026-08-22) added a tile-scoped icon-anchor selector as the FIRST
+ * candidate in `Selectors.studio.audioPlayer`/`audioMoreMenuButton` — see the
+ * "HYPOTHESIS, NOT LIVE-VERIFIED" comment on `Selectors.studio.
+ * audioTileIconAnchor` in selectors.ts for why (no authenticated account was
+ * available to confirm live DOM markup this session) and why it cannot
+ * regress current behavior (broad selectors are kept, unmodified, as
+ * trailing fallback entries in the same arrays).
  *
- * Companion: `getAudioStatus(page)` — non-blocking status probe for callers
- * that want to poll without holding open a long-running RPC.
+ * CORRECTED (Task 6 review, 2026-08-22): "ahead of" only means something for
+ * `audioMoreMenuButton`, which `clickFirstVisible` reads as an ordered loop.
+ * `audioPlayer` is consumed as `readySelectors` — a single comma-joined CSS
+ * OR (`joinAlt` + `.first()` in studio-outputs.ts) — where array position
+ * confers no priority at all. See `Selectors.studio.audioTileIconAnchor` in
+ * selectors.ts for the full correction; the short version: the broad
+ * `readySelectors` entries must be REMOVED, not just out-ordered, before a
+ * second Studio output type can be safely discriminated. The
+ * `inProgressPhrases` story is likewise not tile-scoped in practice —
+ * `isInProgress` (studio-outputs.ts) reads the whole `.studio-panel`
+ * textContent, so any type-agnostic phrase in `GENERATION_IN_PROGRESS_
+ * PHRASES` below matches regardless of which output type is actually
+ * generating.
  */
 
 import type { Page } from "patchright";
 import path from "path";
-import { Selectors, joinAlt } from "./selectors.js";
-import { safeSleep, isRecoverable } from "../browser/watchdog.js";
-import { log } from "../utils/logger.js";
+import { Selectors } from "./selectors.js";
+import { safeSleep } from "../browser/watchdog.js";
+import {
+  registerStudioStrategy,
+  generateStudioOutput,
+  getStudioOutputStatus,
+  downloadStudioOutput,
+  clickFirstVisible,
+} from "./studio-outputs.js";
 
 export type AudioStatus = "ready" | "in_progress" | "not_started";
 
@@ -55,116 +83,10 @@ export interface AudioGenerationResult {
   message?: string;
 }
 
-export async function generateAudioOverview(
-  page: Page,
-  options: GenerateAudioOptions = {}
-): Promise<AudioGenerationResult> {
-  const { customPrompt, waitForCompletion = false, timeoutMs = 600_000 } = options;
-
-  try {
-    // 1. Idempotency: if the completed audio tile is already mounted, the
-    //    user already has an Audio Overview — report ready and do nothing.
-    if (await audioIsReady(page)) {
-      log.info("  ✅ Audio Overview already generated, skipping click");
-      return { status: "ready", alreadyExisted: true };
-    }
-
-    // 2. Generation may already be running. Detect the spinner tile and
-    //    skip clicking again — duplicate clicks would either be no-ops or
-    //    spawn a parallel generation we'd then have to clean up.
-    if (await audioGenerationInProgress(page)) {
-      log.info("  ⏳ Audio Overview generation already running");
-      if (waitForCompletion) {
-        return await waitForAudioReady(page, timeoutMs);
-      }
-      return {
-        status: "in_progress",
-        message:
-          "Audio Overview generation is already running. Poll `get_audio_status` " +
-          "every ~30 s — the audio tile usually appears in 2–10 minutes.",
-      };
-    }
-
-    // 3. The Studio panel can be collapsed by the user — expand it before
-    //    we hunt for the card.
-    await ensureStudioPanelExpanded(page);
-
-    // 4. Trigger generation.
-    if (customPrompt) {
-      await openAudioCustomiseDialog(page);
-      const overlay = page.locator(Selectors.sources.overlayPane).first();
-      const promptField = overlay.locator("textarea, input[type='text']").first();
-      if (await promptField.isVisible({ timeout: 1_500 }).catch(() => false)) {
-        await promptField.fill(customPrompt);
-        await safeSleep(page, 200);
-      }
-      await clickFirstVisible(page, Selectors.studio.generateButton, "Generate button");
-    } else {
-      await clickFirstVisible(page, Selectors.studio.audioOverviewButton, "Audio overview entry");
-    }
-
-    log.info("  🎙️  Audio Overview generation triggered");
-
-    // 5. Either return immediately (default async mode) or block until ready.
-    if (!waitForCompletion) {
-      return {
-        status: "started",
-        message:
-          "Audio Overview generation started. It typically takes 2–10 minutes. " +
-          "Poll `get_audio_status` to check completion, then call `download_audio`.",
-      };
-    }
-
-    return await waitForAudioReady(page, timeoutMs);
-  } catch (err) {
-    if (isRecoverable(err)) throw err;
-    log.warning(`  ⚠️  Audio generation failed: ${err}`);
-    return {
-      status: "error",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function waitForAudioReady(page: Page, timeoutMs: number): Promise<AudioGenerationResult> {
-  const tile = page.locator(joinAlt(Selectors.studio.audioPlayer)).first();
-  await tile.waitFor({ state: "visible", timeout: timeoutMs });
-  return { status: "ready" };
-}
-
-/**
- * Non-blocking status probe used by the `get_audio_status` MCP tool.
- */
-export async function getAudioStatusOnPage(page: Page): Promise<AudioGenerationResult> {
-  try {
-    if (await audioIsReady(page)) {
-      return { status: "ready" };
-    }
-    if (await audioGenerationInProgress(page)) {
-      return {
-        status: "in_progress",
-        message: "Audio Overview is still being generated.",
-      };
-    }
-    return {
-      status: "not_started",
-      message: "No Audio Overview exists yet for this notebook.",
-    };
-  } catch (err) {
-    if (isRecoverable(err)) throw err;
-    return {
-      status: "error",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function audioIsReady(page: Page): Promise<boolean> {
-  return page
-    .locator(joinAlt(Selectors.studio.audioPlayer))
-    .first()
-    .isVisible({ timeout: 500 })
-    .catch(() => false);
+export interface DownloadAudioResult {
+  success: boolean;
+  filePath?: string;
+  message?: string;
 }
 
 /**
@@ -202,135 +124,73 @@ const GENERATION_IN_PROGRESS_PHRASES = [
   "音声の概要を生成しています",
 ];
 
-async function audioGenerationInProgress(page: Page): Promise<boolean> {
-  try {
-    const studioText = await page
-      .locator(".studio-panel")
-      .first()
-      .textContent({ timeout: 500 })
-      .catch(() => null);
-    if (!studioText) return false;
-    const lower = studioText.toLowerCase();
-    return GENERATION_IN_PROGRESS_PHRASES.some((p) => lower.includes(p));
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The Studio panel can be collapsed via the dock-arrow icon. When collapsed
- * the cards aren't in the DOM at all; click the expand-arrow first.
- */
-async function ensureStudioPanelExpanded(page: Page): Promise<void> {
-  const cardVisible = await page
-    .locator(joinAlt(Selectors.studio.audioOverviewButton))
-    .first()
-    .isVisible({ timeout: 500 })
-    .catch(() => false);
-  if (cardVisible) return;
-
-  const expandSelectors = [
-    'button:has(mat-icon:text-is("dock_to_left"))',
-    'button[aria-label*="erweitern" i][aria-label*="studio" i]',
-    'button[aria-label*="expand" i][aria-label*="studio" i]',
-    'button[aria-label*="ouvrir" i][aria-label*="studio" i]',
-    'button[aria-label*="abrir" i][aria-label*="studio" i]',
-    'button[aria-label*="aprire" i][aria-label*="studio" i]',
-  ];
-  for (const sel of expandSelectors) {
-    const btn = page.locator(sel).first();
-    if (await btn.isVisible({ timeout: 500 }).catch(() => false)) {
-      await btn.click().catch(() => undefined);
-      await safeSleep(page, 400);
-      return;
+async function triggerAudio(page: Page, opts: { customPrompt?: string }): Promise<void> {
+  if (opts.customPrompt) {
+    await clickFirstVisible(page, Selectors.studio.audioCustomiseButton, "Audio customise button");
+    const overlay = page.locator(Selectors.sources.overlayPane).first();
+    const promptField = overlay.locator("textarea, input[type='text']").first();
+    if (await promptField.isVisible({ timeout: 1_500 }).catch(() => false)) {
+      await promptField.fill(opts.customPrompt);
+      await safeSleep(page, 200);
     }
+    await clickFirstVisible(page, Selectors.studio.generateButton, "Generate button");
+  } else {
+    await clickFirstVisible(page, Selectors.studio.audioOverviewButton, "Audio overview entry");
   }
 }
 
-async function openAudioCustomiseDialog(page: Page): Promise<void> {
-  const customiseSelectors = [
-    'button[aria-label*="audio-zusammenfassung anpassen" i]',
-    'button[aria-label*="audio" i][aria-label*="anpassen" i]',
-    'button[aria-label*="customise audio" i]',
-    'button[aria-label*="customize audio" i]',
-    'button[aria-label*="personnaliser" i][aria-label*="audio" i]',
-    'button[aria-label*="personalizar" i][aria-label*="audio" i]',
-    'button[aria-label*="personalizza" i][aria-label*="audio" i]',
-  ];
-  await clickFirstVisible(page, customiseSelectors, "Audio customise button");
+async function downloadAudio(page: Page, destDir: string): Promise<DownloadAudioResult> {
+  await clickFirstVisible(page, Selectors.studio.audioMoreMenuButton, "Audio more-menu button");
+  await safeSleep(page, 250);
+  const downloadPromise = page.waitForEvent("download", { timeout: 60_000 });
+  await clickFirstVisible(page, Selectors.studio.audioDownloadMenuItem, "Audio download menu item");
+  const download = await downloadPromise;
+  const suggested = download.suggestedFilename();
+  const targetPath = path.join(destDir, suggested || "notebooklm-audio.wav");
+  await download.saveAs(targetPath);
+  return { success: true, filePath: targetPath };
 }
 
-export interface DownloadAudioResult {
-  success: boolean;
-  filePath?: string;
-  message?: string;
+registerStudioStrategy("audio", {
+  kind: "file",
+  triggerSelectors: Selectors.studio.audioOverviewButton,
+  // NOT tile-scoped in practice: `isInProgress` (studio-outputs.ts) reads
+  // the ENTIRE `.studio-panel` textContent, not this type's own tile/card,
+  // so any type-agnostic phrase here (e.g. "check back in a few minutes")
+  // matches regardless of which output type is actually generating. Once a
+  // second Studio output type is registered (Phase 2), a generating output
+  // of that other type would also make `get_studio_output_status(page,
+  // "audio")` report `in_progress`. Real per-tile scoping needs to be added
+  // to `isInProgress` before that can be trusted.
+  inProgressPhrases: GENERATION_IN_PROGRESS_PHRASES,
+  // Fallback chain: tile-scoped icon anchor listed first (Task 6
+  // hypothesis, not live-verified — see selectors.ts), broad pre-Task-6
+  // selectors kept as trailing fallback so nothing that worked before this
+  // task can have stopped working. IMPORTANT: `readySelectors` is consumed
+  // as a single comma-joined CSS OR (`joinAlt` + `.first()`), NOT an
+  // ordered loop — listing the anchor first here does NOT give it priority
+  // over the broad entries below it. See Selectors.studio.audioPlayer /
+  // Selectors.studio.audioTileIconAnchor in selectors.ts for the full
+  // correction and what must change before a second output type registers.
+  readySelectors: Selectors.studio.audioPlayer,
+  trigger: triggerAudio,
+  download: downloadAudio,
+});
+
+export async function generateAudioOverview(
+  page: Page,
+  options: GenerateAudioOptions = {}
+): Promise<AudioGenerationResult> {
+  return generateStudioOutput(page, "audio", options);
 }
 
-/**
- * Download the completed Audio Overview. Strategy:
- *   1. Verify the audio tile exists (else surface a clear error).
- *   2. Click the per-tile three-dot "Mehr"/"More" button to open the menu.
- *   3. Click the "Download" / "Herunterladen" / … menu item.
- *   4. Capture the resulting `download` event and save to `destinationDir`.
- */
+export async function getAudioStatusOnPage(page: Page): Promise<AudioGenerationResult> {
+  return getStudioOutputStatus(page, "audio");
+}
+
 export async function downloadAudioOverview(
   page: Page,
-  destinationDir: string,
-  preferredFileName: string = "notebooklm-audio.wav"
+  destinationDir: string
 ): Promise<DownloadAudioResult> {
-  try {
-    if (!(await audioIsReady(page))) {
-      return {
-        success: false,
-        message:
-          "No completed Audio Overview found. Trigger `generate_audio` first " +
-          "and wait for `get_audio_status` to report `ready`.",
-      };
-    }
-
-    // Open the three-dot menu on the audio tile.
-    await clickFirstVisible(page, Selectors.studio.audioMoreMenuButton, "Audio more-menu button");
-    await safeSleep(page, 250);
-
-    // Now race the download event against the menu-item click.
-    const downloadPromise = page.waitForEvent("download", { timeout: 60_000 });
-    await clickFirstVisible(
-      page,
-      Selectors.studio.audioDownloadMenuItem,
-      "Audio download menu item"
-    );
-    const download = await downloadPromise;
-
-    const suggested = download.suggestedFilename();
-    const targetPath = path.join(destinationDir, suggested || preferredFileName);
-    await download.saveAs(targetPath);
-
-    return { success: true, filePath: targetPath };
-  } catch (err) {
-    if (isRecoverable(err)) throw err;
-    log.warning(`  ⚠️  Audio download failed: ${err}`);
-    return {
-      success: false,
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function clickFirstVisible(
-  page: Page,
-  selectors: readonly string[],
-  label: string
-): Promise<void> {
-  for (const sel of selectors) {
-    const candidate = page.locator(sel).first();
-    if (await candidate.isVisible({ timeout: 1_500 }).catch(() => false)) {
-      await candidate.click();
-      await safeSleep(page, 300);
-      return;
-    }
-  }
-  throw new Error(
-    `Could not find ${label} — selectors: ${selectors.join(" | ")}. ` +
-      "NotebookLM Studio UI may have changed."
-  );
+  return downloadStudioOutput(page, "audio", destinationDir);
 }
