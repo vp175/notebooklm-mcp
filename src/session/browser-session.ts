@@ -37,6 +37,13 @@ import {
   type AudioGenerationResult,
   type DownloadAudioResult,
 } from "../notebooklm/audio.js";
+// Side-effect imports: each registers its Studio-output strategy into the
+// shared engine (studio-outputs.ts) on load. No named exports needed here —
+// generateStudioOutput/etc. below dispatch generically across every
+// registered type.
+import "../notebooklm/video-overview.js";
+import "../notebooklm/infographic.js";
+import "../notebooklm/slides.js";
 import {
   generateStudioOutput,
   getStudioOutputStatus,

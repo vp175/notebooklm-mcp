@@ -41,9 +41,14 @@ export const generateStudioOutputTool: Tool = {
   description:
     "Trigger generation of any NotebookLM Studio output. **Async by default** " +
     "— returns immediately with status `started`/`in_progress`/`ready`. " +
-    "Only `audio` is implemented by this server today; the other 8 types " +
-    'in the enum return a clear "not yet implemented" error (Phase 2). ' +
-    "Workflow: generate_studio_output → poll " +
+    "`audio`, `video`, `infographic`, and `slides` are implemented by this " +
+    'server today; other types in the enum return a clear "not yet ' +
+    'implemented" error (Phase 2). KNOWN LIMITATION: status reporting ' +
+    "during generation is currently unreliable (a real ~7-min generation " +
+    "was observed reporting not_started throughout) — avoid calling this " +
+    "twice for the same output_type in quick succession, as the in-progress " +
+    "guard may not catch it and a second call could start a duplicate " +
+    "generation. Workflow: generate_studio_output → poll " +
     "get_studio_output_status → download_studio_output (file kinds: audio/" +
     "video/report/slides/infographic) or get_studio_output_content " +
     "(structured kinds: mindmap/datatable/quiz/flashcards).",

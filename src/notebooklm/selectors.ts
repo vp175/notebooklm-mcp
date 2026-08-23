@@ -42,6 +42,85 @@
  */
 const AUDIO_TILE_ICON_ANCHOR = 'mat-icon:text-is("audio_magic_eraser")';
 
+/**
+ * Material-Symbols icon ligature per Studio output type. Confirmed LIVE
+ * 2026-08-23 against the real notebook.google.com layout: every trigger
+ * tile in `.create-artifact-button-container` carries one of these as its
+ * `<mat-icon>` text, AND — confirmed against real, already-completed
+ * artifacts (not guessed) — a finished tile in `.artifact-item-button`
+ * re-displays the SAME ligature. This is the primary, verified scoping
+ * anchor for every per-type selector below; it is locale-independent, so
+ * it also replaces the need for a per-locale aria-label fallback chain on
+ * these newer types the way `audioOverviewButton` still carries one.
+ *
+ * "audio" kept here even though `AUDIO_TILE_ICON_ANCHOR` above already
+ * exists — that const predates this map and stays for the string literals
+ * that reference it directly; this map exists so the studio-file-kind
+ * strategy files (Task 2+) can look up any type's ligature by name.
+ */
+export const STUDIO_TILE_ICON_LIGATURES: Record<string, string> = {
+  audio: "audio_magic_eraser",
+  slides: "tablet",
+  video: "subscriptions",
+  mindmap: "flowchart",
+  report: "auto_tab_group",
+  flashcards: "cards_star",
+  quiz: "quiz",
+  infographic: "stacked_bar_chart",
+  datatable: "table_view",
+};
+
+/**
+ * Trigger-tile selector for any Studio output type, scoped by its icon
+ * ligature — the entry-point control that starts generation. Confirmed
+ * live 2026-08-23: `div[role="button"].create-artifact-button-container`
+ * with a `<mat-icon>` whose text is the type's ligature and an
+ * `aria-label` equal to the (English) display name. The `aria-label`
+ * candidate is kept as a fallback for locales where the ligature text
+ * might legitimately differ (unverified — no non-English locale was
+ * checked this session), matching this file's own anchor-priority
+ * convention (class/icon over locale-bound text).
+ */
+export function studioTriggerSelectors(ligature: string, englishAriaLabel: string): string[] {
+  return [
+    `.create-artifact-button-container:has(mat-icon:text-is("${ligature}"))`,
+    `[role="button"]:has(mat-icon:text-is("${ligature}"))`,
+    `[role="button"][aria-label="${englishAriaLabel}"]`,
+  ];
+}
+
+/**
+ * Completed-tile selector for any Studio output type, scoped by its icon
+ * ligature. `.artifact-item-button` is the CONFIRMED LIVE (2026-08-23)
+ * completed-artifact container — NOT the `artifact-library-item` custom
+ * element `audioPlayer`/`audioMoreMenuButton` previously assumed (that
+ * assumption was written as an explicit, never-live-verified hypothesis
+ * during Task 6, 2026-08-22, without an authenticated account available;
+ * it does not match any element in the current DOM — the NotebookLM UI
+ * markup has changed since the pre-Task-6 selectors were last verified,
+ * 2026-05).
+ */
+export function studioReadyTileSelectors(ligature: string): string[] {
+  return [`.artifact-item-button:has(mat-icon:text-is("${ligature}"))`];
+}
+
+/**
+ * The three-dot "more" menu button for a completed tile, scoped to that
+ * SPECIFIC type via its ligature (not "the first more-button on the
+ * page"). Confirmed live 2026-08-23: clicking it opens a
+ * `.mat-mdc-menu-panel` with type-specific items (e.g. Slide Deck offers
+ * "Download PDF Document (.pdf)" and "Download PowerPoint (.pptx)";
+ * Video Overview and Infographic each offer a single "Download"; Reports
+ * offers "Export to Docs"/"Export to Sheets" instead of a direct
+ * download — see each type's own strategy file for its specific menu-item
+ * handling).
+ */
+export function studioMoreMenuSelectors(ligature: string): string[] {
+  return [
+    `.artifact-item-button:has(mat-icon:text-is("${ligature}")) button:has(mat-icon:text-is("more_vert"))`,
+  ];
+}
+
 export const Selectors = {
   chat: {
     answerContainer: ".to-user-container",
@@ -252,46 +331,20 @@ export const Selectors = {
 
   studio: {
     /**
-     * Tile-scoping icon anchor for Audio Overview specifically, intended to
-     * filter `artifact-library-item` down to audio's own tile instead of
-     * matching the first/any artifact once more Studio output types exist
-     * (Phase 2). Backed by the module-level `AUDIO_TILE_ICON_ANCHOR` const
-     * above — this property and the `readySelectors`/`audioMoreMenuButton`
-     * entries below all reference that single const rather than each
-     * re-typing the icon-name string.
+     * Tile-scoping icon anchor for Audio Overview specifically. Backed by
+     * the module-level `AUDIO_TILE_ICON_ANCHOR` const above.
      *
-     * HYPOTHESIS, NOT LIVE-VERIFIED (Task 6, 2026-08-22): no authenticated
-     * NotebookLM account was available this session (`get_health` reports
-     * `authenticated: false` on both this fork and the live-connected
-     * server — see docs/superpowers/plans/2026-08-22-full-feature-protocol-
-     * upgrade.md "Execution Note"), so the planned live-DOM reconnaissance
-     * (does the completed tile redisplay its trigger's `audio_magic_eraser`
-     * icon as a badge?) could not run. This selector assumes it does,
-     * grounded only in this file's own documented anchor-priority
-     * convention (Material-Symbols icon names are the most stable,
-     * language-agnostic anchor — see file header). Re-verify against the
-     * live site once an authenticated account is available.
-     *
-     * CORRECTED (Task 6 review, 2026-08-22): being listed first in
-     * `readySelectors` does NOT give this anchor priority over the broad
-     * entries later in that same array. `readySelectors` is consumed as a
-     * single comma-joined CSS OR selector (`joinAlt(...)` + `.first()`, see
-     * `isReady`/`waitUntilReady` in studio-outputs.ts) — array position is
-     * irrelevant to a CSS OR; `.first()` returns whichever match comes
-     * first in DOM order regardless of which array entry matched it. That
-     * is exactly why this anchor cannot regress today's audio-only
-     * behavior (it's a harmless no-op today), but it is also why it will
-     * NEVER start discriminating between output types just by sitting
-     * earlier in the array. The broad `artifact-library-item:has(button.
-     * artifact-action-button)` / `.artifact-library-container
-     * artifact-library-item` entries in `readySelectors` MUST be actually
-     * REMOVED — not merely left as trailing "fallback" — once a second
-     * Studio output type is registered (Phase 2), or tile discrimination
-     * will silently fail (the second type's tile satisfies those broad
-     * selectors too). This anchor's behavior differs by consumer:
-     * `audioMoreMenuButton` (below) is read by `clickFirstVisible`, which
-     * IS an ordered loop — there, listing this anchor first genuinely does
-     * give it priority.
+     * RESOLVED 2026-08-23 (was "hypothesis, not live-verified" from Task 6,
+     * 2026-08-22): confirmed live, against real completed artifacts, that a
+     * finished tile DOES re-display its trigger's icon ligature — but in
+     * `.artifact-item-button`, not the `artifact-library-item` custom
+     * element this anchor and `audioPlayer`/`audioMoreMenuButton` below
+     * previously assumed. That element does not exist anywhere in the
+     * current DOM; see `studioReadyTileSelectors`/`studioMoreMenuSelectors`
+     * above, now used directly by `audioPlayer`/`audioMoreMenuButton`
+     * below — this makes those genuinely tile-scoped (a real CSS AND via
+     * `:has()`, not a same-priority OR-with-a-broad-catch-all), which is
+     * what makes it safe to register a second Studio output type.
      */
     audioTileIconAnchor: AUDIO_TILE_ICON_ANCHOR,
     /**
@@ -318,22 +371,6 @@ export const Selectors = {
       'button[aria-label*="audio overview" i]',
       'button[aria-label*="audio-zusammenfassung" i]',
       'button[aria-label*="podcast" i]',
-    ],
-    /**
-     * Per-card "Customise"/"Anpassen" button that opens the sub-dialog for
-     * supplying a focus prompt before generation. Moved here verbatim from
-     * `audio.ts`'s formerly-inlined `openAudioCustomiseDialog` selector
-     * array (Task 6) so `selectors.ts` remains the single source of truth
-     * for all Studio selectors, per this file's own convention.
-     */
-    audioCustomiseButton: [
-      'button[aria-label*="audio-zusammenfassung anpassen" i]',
-      'button[aria-label*="audio" i][aria-label*="anpassen" i]',
-      'button[aria-label*="customise audio" i]',
-      'button[aria-label*="customize audio" i]',
-      'button[aria-label*="personnaliser" i][aria-label*="audio" i]',
-      'button[aria-label*="personalizar" i][aria-label*="audio" i]',
-      'button[aria-label*="personalizza" i][aria-label*="audio" i]',
     ],
     /**
      * Generate / Generieren / Générer trigger inside the customise dialog.
@@ -368,70 +405,105 @@ export const Selectors = {
       'button[aria-label*="ダウンロード" i]',
     ],
     /**
-     * Completed Audio-Overview tile. Modern NotebookLM does NOT mount a real
-     * `<audio>` element in the DOM; the player is a custom Angular tile
-     * inside `.artifact-library-container > artifact-library-item`. The
-     * play-button (`button.artifact-action-button` with locale-bound
-     * aria-label "Wiedergeben"/"Play"/…) is the most reliable "audio is
-     * ready" signal because it only mounts after generation completes.
+     * Completed Audio-Overview tile. CORRECTED 2026-08-23 (was pre-Task-6,
+     * last verified 2026-05): the real container is `.artifact-item-button`
+     * (confirmed live against actual completed artifacts), not the
+     * `artifact-library-item` custom element these selectors previously
+     * assumed — that element matches nothing in the current DOM. Now
+     * genuinely tile-scoped via `studioReadyTileSelectors` (a real `:has()`
+     * AND on the ligature, not a broad OR that any type's tile would
+     * satisfy), which is the fix that makes registering additional Studio
+     * output types safe.
      */
-    audioPlayer: [
-      // Tile-scoped icon anchor (Task 6) — see `audioTileIconAnchor` above
-      // for the hypothesis/fallback reasoning. NOTE: this array is consumed
-      // as `readySelectors` via `joinAlt(...)` + `.first()` (a single
-      // comma-joined CSS OR — see isReady/waitUntilReady in
-      // studio-outputs.ts), NOT via the ordered `clickFirstVisible` loop.
-      // Listing this anchor FIRST here is cosmetic only: a CSS OR gives no
-      // priority to array position, `.first()` just returns whichever
-      // match comes first in DOM order. It is harmless today only because
-      // the broad selectors below still match audio's own tile (audio is
-      // the only registered Studio output) — it will NOT start
-      // discriminating between output types merely by sitting earlier in
-      // this array. Once a second Studio output type is registered
-      // (Phase 2), the broad entries below MUST be removed (not just kept
-      // as trailing "fallback"), or this anchor's presence here is a no-op
-      // and discrimination silently fails.
-      `artifact-library-item:has(${AUDIO_TILE_ICON_ANCHOR}):has(button.artifact-action-button)`,
-      // Broad selectors (pre-Task-6, still the governing match today).
-      "artifact-library-item:has(button.artifact-action-button)",
-      ".artifact-library-container artifact-library-item",
-      // Legacy <audio> tag for older builds.
-      "audio",
-      '[role="audio"]',
-    ],
+    audioPlayer: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.audio),
     /**
      * Per-tile "Mehr"/"More"/"Plus"/… three-dot button. Opens the menu that
-     * contains the Download item.
+     * contains the Download item. CORRECTED 2026-08-23 — same
+     * `artifact-library-item` → `.artifact-item-button` fix as `audioPlayer`
+     * above, confirmed live by actually opening this menu on a real
+     * completed artifact.
      */
-    audioMoreMenuButton: [
-      // Tile-scoped icon anchor (Task 6) — same live-verification caveat as
-      // `audioTileIconAnchor` above, but a DIFFERENT priority story than
-      // `audioPlayer`'s `readySelectors` array: this selector list is
-      // consumed by `clickFirstVisible` (studio-outputs.ts), which IS an
-      // ordered loop that tries each candidate in turn and clicks the first
-      // one that's visible. Listing this narrow anchor first genuinely does
-      // give it priority here — it is not the CSS-OR no-op that
-      // `readySelectors` is. The broad selectors below are kept as true
-      // fallbacks (used only if this anchor's candidate isn't visible), so
-      // behavior cannot regress if this narrower candidate never matches
-      // anything real.
-      `artifact-library-item:has(${AUDIO_TILE_ICON_ANCHOR}) button:has(mat-icon:text-is("more_vert"))`,
-      // Broad selectors (pre-Task-6, still the governing match today).
-      'artifact-library-item button:has(mat-icon:text-is("more_vert"))',
-      'artifact-library-item button[aria-label*="mehr" i]',
-      'artifact-library-item button[aria-label*="more" i]',
-      'artifact-library-item button[aria-label*="plus" i]',
-      'artifact-library-item button[aria-label*="más" i]',
-      'artifact-library-item button[aria-label*="altro" i]',
-      'artifact-library-item button[aria-label*="mais" i]',
-      'artifact-library-item button[aria-label*="meer" i]',
-      'artifact-library-item button[aria-label*="その他" i]',
+    audioMoreMenuButton: studioMoreMenuSelectors(STUDIO_TILE_ICON_LIGATURES.audio),
+    /**
+     * Video Overview trigger tile. The tile selector itself was confirmed
+     * live 2026-08-23 (real completed artifact in a test
+     * notebook). CORRECTION: an earlier version of this comment claimed a
+     * one-click entry with no dialog — that was wrong (see audio.ts's
+     * header for the full story); the click opens a "Customize Video
+     * Overview" dialog requiring an explicit "Generate" click, handled by
+     * `triggerViaDialog` (studio-outputs.ts), also confirmed live.
+     */
+    videoOverviewButton: studioTriggerSelectors(STUDIO_TILE_ICON_LIGATURES.video, "Video Overview"),
+    /** Completed Video Overview tile. Confirmed live 2026-08-23. */
+    videoOverviewTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.video),
+    /**
+     * Video Overview's three-dot menu. Confirmed live 2026-08-23: opens a
+     * menu with a single `save_alt`-icon "Download" item (no format
+     * choice), plus Share/Rename/View prompt and sources/Delete.
+     */
+    videoOverviewMoreMenuButton: studioMoreMenuSelectors(STUDIO_TILE_ICON_LIGATURES.video),
+    /**
+     * Infographic trigger tile. The tile selector itself was confirmed
+     * live 2026-08-23 (real completed artifacts in a test
+     * notebook). CORRECTION: an earlier version of this comment claimed a
+     * one-click entry with no dialog — wrong; the click opens a "Customize
+     * Infographic" dialog requiring an explicit "Generate" click, handled
+     * by `triggerViaDialog` (studio-outputs.ts), also confirmed live.
+     */
+    infographicButton: studioTriggerSelectors(
+      STUDIO_TILE_ICON_LIGATURES.infographic,
+      "Infographic"
+    ),
+    /** Completed Infographic tile. Confirmed live 2026-08-23. */
+    infographicTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.infographic),
+    /**
+     * Infographic's three-dot menu. Confirmed live 2026-08-23: identical
+     * shape to Video Overview's — single `save_alt`-icon "Download" item.
+     */
+    infographicMoreMenuButton: studioMoreMenuSelectors(STUDIO_TILE_ICON_LIGATURES.infographic),
+    /**
+     * Slide Deck trigger tile. The tile selector itself was confirmed live
+     * 2026-08-23 (real completed artifact in a test
+     * notebook). CORRECTION: an earlier version of this
+     * comment claimed a one-click entry with no dialog — wrong; the click
+     * opens a "Customize Slide Deck" dialog requiring an explicit
+     * "Generate" click, handled by `triggerViaDialog` (studio-outputs.ts),
+     * also confirmed live.
+     */
+    slidesButton: studioTriggerSelectors(STUDIO_TILE_ICON_LIGATURES.slides, "Slide Deck"),
+    /** Completed Slide Deck tile. Confirmed live 2026-08-23. */
+    slidesTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.slides),
+    /**
+     * Slide Deck's three-dot menu. Confirmed live 2026-08-23 — UNLIKE
+     * Video/Infographic, this menu offers TWO download formats
+     * ("Download PDF Document (.pdf)" and "Download PowerPoint (.pptx)")
+     * plus Share/Rename/"Start slideshow"/Revise/"View prompt and
+     * sources"/Delete. `slides.ts` defaults to the PDF item.
+     */
+    slidesMoreMenuButton: studioMoreMenuSelectors(STUDIO_TILE_ICON_LIGATURES.slides),
+    /** Slide Deck's PDF download menu item (the format this server uses). */
+    slidesDownloadPdfMenuItem: [
+      `[role="menuitem"]:has(mat-icon:text-is("drive_pdf"))`,
+      `[role="menuitem"]:has-text("Download PDF")`,
     ],
     /**
-     * Download menu-item that surfaces after clicking the three-dot menu.
+     * Download menu-item that surfaces after clicking a completed tile's
+     * three-dot menu, for any Studio output type whose menu offers exactly
+     * one, unambiguous "Download" item (no format choice) — currently
+     * Audio Overview, Video Overview, and Infographic all share this exact
+     * shape (confirmed live 2026-08-23). RENAMED 2026-08-23 from
+     * `audioDownloadMenuItem` — it was audio-only in name only; the other
+     * two types were duplicating a thinner, locale-poor copy of this same
+     * list locally instead of reusing it, which this rename/consolidation
+     * fixes (single source of truth, matching this file's own convention).
+     * Icon-ligature candidate CORRECTED 2026-08-23: live-verified against a
+     * real, freshly-generated Audio Overview artifact as `save_alt`, not
+     * `download` (the icon-ligature entry below was previously unverified
+     * and wrong — it silently never matched, falling through to the
+     * English text candidate, which is why downloads still worked).
      */
-    audioDownloadMenuItem: [
-      '[role="menuitem"]:has(mat-icon:text-is("download"))',
+    singleDownloadMenuItem: [
+      '[role="menuitem"]:has(mat-icon:text-is("save_alt"))',
       '[role="menuitem"]:has-text("Download")',
       '[role="menuitem"]:has-text("Herunterladen")',
       '[role="menuitem"]:has-text("Télécharger")',

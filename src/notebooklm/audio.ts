@@ -13,18 +13,44 @@
  * concern even though `studio-outputs.ts` is itself imported here for the
  * engine's functions).
  *
- * 2026-05 Studio UX (verified live in DE/EN locales, pre-Task-6):
- *   - The "Audio Overview" entry is a `<div role="button">` with a Material-
- *     Symbols `audio_magic_eraser` icon. *One click* on it kicks off
- *     generation; there is no separate "Generate" step unless the user
- *     opens the per-card "Anpassen" sub-dialog first.
- *   - While generating, NotebookLM shows a "Audio-Zusammenfassung wird … —
- *     Kommen Sie in ein paar Minuten wieder" tile with a spinner.
- *   - When generation completes, NotebookLM mounts an `artifact-library-item`
- *     tile with a Play button (`button.artifact-action-button`, locale-bound
- *     aria-label "Wiedergeben"/"Play"/…) and a three-dot menu containing
- *     "Download" / "Herunterladen" / "Télécharger" / …. There is *no real*
- *     `<audio>` element in the DOM.
+ * CORRECTED 2026-08-23 (live-verified against the current Gemini Notebook
+ * UI, real account): the 2026-05 "one click, no dialog" claim below is
+ * WRONG for today's UI. Clicking the `audio_magic_eraser` trigger tile
+ * ALWAYS opens a "Customize Audio Overview" `mat-dialog-container`
+ * (Format/Language/Length/Sources/focus-prompt fields) behind a
+ * `cdk-overlay-backdrop`; generation only starts once that dialog's
+ * "Generate" button is clicked. `triggerAudio` now goes through
+ * `triggerViaDialog` (studio-outputs.ts) to do exactly that — confirmed
+ * live: dialog opens, Generate closes it (backdrop detaches), and
+ * generation genuinely starts server-side. Before this fix, the bare click
+ * this file used to make opened the dialog and stopped there — Audio
+ * generation had likely never actually started via this server, which is
+ * consistent with no completed Audio Overview artifact existing anywhere
+ * in the test account despite the tool reporting `status: "started"`.
+ *
+ * 2026-05 Studio UX (verified live in DE/EN locales, pre-Task-6; the "one
+ * click" and `artifact-library-item` claims are superseded — see above and
+ * selectors.ts's `audioTileIconAnchor` note — rest still holds directionally):
+ *   - While generating, NotebookLM shows a spinner/placeholder tile (exact
+ *     current-UI markup not yet captured — this session's live generation
+ *     never registered a match on any of the standard Material spinner
+ *     selectors tried, so the real spinner class remains unknown; status
+ *     checks degrade to `not_started` during generation rather than
+ *     `in_progress`, which is wrong-but-safe, not a crash).
+ *   - When generation completes, the real completed tile is
+ *     `.artifact-item-button` (not `artifact-library-item`, which does not
+ *     exist in the current DOM) with a three-dot menu containing a
+ *     `save_alt`-icon "Download" item.
+ *
+ * DOWNLOAD FLOW — fixed 2026-08-23, `downloadAudio` now delegates to the
+ * shared `downloadViaSingleMenuItem` (studio-outputs.ts), which itself had
+ * a real, live-confirmed bug: clicking "Download" opens a NEW popup page,
+ * and the browser `download` event fires there — not on the original page.
+ * The old code (both here and the shared helper) listened on the wrong
+ * page and always timed out after 60s even though the click succeeded.
+ * Verified end-to-end against a freshly-generated Audio Overview: trigger
+ * → dialog → Generate → ~7 min real generation → ready tile → download
+ * produced a real 46MB `.m4a` file.
  *
  * Task 6 (2026-08-22) added a tile-scoped icon-anchor selector as the FIRST
  * candidate in `Selectors.studio.audioPlayer`/`audioMoreMenuButton` — see the
@@ -50,15 +76,14 @@
  */
 
 import type { Page } from "patchright";
-import path from "path";
 import { Selectors } from "./selectors.js";
-import { safeSleep } from "../browser/watchdog.js";
 import {
   registerStudioStrategy,
   generateStudioOutput,
   getStudioOutputStatus,
   downloadStudioOutput,
-  clickFirstVisible,
+  triggerViaDialog,
+  downloadViaSingleMenuItem,
 } from "./studio-outputs.js";
 
 export type AudioStatus = "ready" | "in_progress" | "not_started";
@@ -125,30 +150,19 @@ const GENERATION_IN_PROGRESS_PHRASES = [
 ];
 
 async function triggerAudio(page: Page, opts: { customPrompt?: string }): Promise<void> {
-  if (opts.customPrompt) {
-    await clickFirstVisible(page, Selectors.studio.audioCustomiseButton, "Audio customise button");
-    const overlay = page.locator(Selectors.sources.overlayPane).first();
-    const promptField = overlay.locator("textarea, input[type='text']").first();
-    if (await promptField.isVisible({ timeout: 1_500 }).catch(() => false)) {
-      await promptField.fill(opts.customPrompt);
-      await safeSleep(page, 200);
-    }
-    await clickFirstVisible(page, Selectors.studio.generateButton, "Generate button");
-  } else {
-    await clickFirstVisible(page, Selectors.studio.audioOverviewButton, "Audio overview entry");
-  }
+  await triggerViaDialog(page, Selectors.studio.audioOverviewButton, "Audio overview entry", {
+    customPrompt: opts.customPrompt,
+  });
 }
 
 async function downloadAudio(page: Page, destDir: string): Promise<DownloadAudioResult> {
-  await clickFirstVisible(page, Selectors.studio.audioMoreMenuButton, "Audio more-menu button");
-  await safeSleep(page, 250);
-  const downloadPromise = page.waitForEvent("download", { timeout: 60_000 });
-  await clickFirstVisible(page, Selectors.studio.audioDownloadMenuItem, "Audio download menu item");
-  const download = await downloadPromise;
-  const suggested = download.suggestedFilename();
-  const targetPath = path.join(destDir, suggested || "notebooklm-audio.wav");
-  await download.saveAs(targetPath);
-  return { success: true, filePath: targetPath };
+  return downloadViaSingleMenuItem(
+    page,
+    Selectors.studio.audioMoreMenuButton,
+    Selectors.studio.singleDownloadMenuItem,
+    destDir,
+    "notebooklm-audio.wav"
+  );
 }
 
 registerStudioStrategy("audio", {
