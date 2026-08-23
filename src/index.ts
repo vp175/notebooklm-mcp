@@ -32,7 +32,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { Tool, ElicitRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool, ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import type { ProgressCallback } from "./types.js";
@@ -253,7 +253,7 @@ class NotebookLMMCPServer {
           // shape, so this cast is safe.
           return await this.server.elicitInput({
             message,
-            requestedSchema: schema as ElicitRequest["params"]["requestedSchema"],
+            requestedSchema: schema as ElicitRequestFormParams["requestedSchema"],
           });
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
