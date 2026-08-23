@@ -1,35 +1,48 @@
 /**
- * Streamable-HTTP transport for the MCP server (issue #4).
+ * HTTP transport for the MCP server (issue #4).
  *
- * Hosts the MCP protocol over HTTP using the SDK's
- * `StreamableHTTPServerTransport`. Built on Node's stdlib `http` module so we
- * don't pull in Express just to forward requests. Two operations:
+ * Built on the v2 SDK's `createMcpHandler`, which is one of the two entry
+ * points that actually put protocol revision **2026-07-28** on the wire (the
+ * other is `serveStdio`). Constructing a `Server` by hand and attaching a
+ * transport — what this file used to do — serves the 2025 era only.
  *
- *   POST /mcp        — JSON-RPC requests/responses
- *   GET  /healthz    — liveness probe (200 OK with version)
+ * `createMcpHandler` also owns instance lifetime: it builds an instance from
+ * the factory per exchange, which removes the session bookkeeping this file
+ * used to hand-roll — including the bug where every HTTP session after the
+ * first crashed with "already connected", because one `Server` instance was
+ * being connected to every transport.
  *
- * Multiple sessions are supported via the `Mcp-Session-Id` header — each
- * session keeps its own transport so concurrent clients don't tread on each
- * other. Session lifecycle is fully owned by the SDK; we just route.
+ * Routes:
+ *   POST   /mcp     — JSON-RPC requests/responses (both eras)
+ *   GET    /mcp     — SSE stream (2025-era sessions; 405 under the stateless
+ *                     legacy fallback)
+ *   DELETE /mcp     — session termination (same caveat)
+ *   GET    /healthz — liveness probe
+ *
+ * SECURITY: this transport has NO authentication and performs NO Host or
+ * Origin validation. Bind it to localhost, or put it behind a proxy that
+ * authenticates — anything that can reach the port can drive the signed-in
+ * browser this server automates.
  */
 
 import {
   createServer,
-  IncomingMessage,
+  type IncomingMessage,
   type Server as HttpServer,
-  ServerResponse,
+  type ServerResponse,
 } from "node:http";
-import { randomUUID } from "node:crypto";
-import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  createMcpHandler,
+  type McpHttpHandler,
+  type McpServerFactory,
+} from "@modelcontextprotocol/server";
 import { log } from "../utils/logger.js";
 
 export interface HttpTransportOptions {
   port: number;
   host?: string;
-  /** Connect callback invoked once per new session — wires the McpServer to the transport. */
-  connect: (transport: StreamableHTTPServerTransport) => Promise<void>;
+  /** Builds one MCP server instance. Called per exchange by the SDK handler. */
+  factory: McpServerFactory;
 }
 
 export interface HttpTransportHandle {
@@ -37,13 +50,16 @@ export interface HttpTransportHandle {
   close: () => Promise<void>;
 }
 
-const SESSION_HEADER = "mcp-session-id";
-
 export async function startHttpTransport(opts: HttpTransportOptions): Promise<HttpTransportHandle> {
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+  const handler: McpHttpHandler = createMcpHandler(opts.factory, {
+    // Keep serving 2025-era clients: this server is registered in clients that
+    // have not moved to the new revision yet, and dropping them buys nothing.
+    legacy: "stateless",
+    onerror: (error) => log.warning(`⚠️  [HTTP] ${error.message}`),
+  });
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, transports, opts).catch((err) => {
+    void handleRequest(req, res, handler).catch((err) => {
       log.error(`❌ [HTTP] Unhandled request error: ${err}`);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -59,6 +75,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       log.success(
         `🌐 HTTP transport listening on http://${opts.host ?? "127.0.0.1"}:${opts.port}/mcp`
       );
+      log.warning("  ⚠️  No authentication and no Host/Origin checks — keep this on localhost.");
       resolve();
     });
   });
@@ -66,14 +83,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   return {
     server,
     close: async () => {
-      for (const t of transports.values()) {
-        try {
-          await t.close();
-        } catch {
-          /* ignore — best-effort shutdown */
-        }
-      }
-      transports.clear();
+      await handler.close();
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve()))
       );
@@ -81,22 +91,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   };
 }
 
-/**
- * Use the McpServer high-level Server class — it accepts any Transport.
- * Bridge helper kept for callers wiring an existing McpServer instance.
- */
-export async function bindMcpServer(
-  mcpServer: McpServer,
-  transport: StreamableHTTPServerTransport
-): Promise<void> {
-  await mcpServer.connect(transport);
-}
-
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  transports: Map<string, StreamableHTTPServerTransport>,
-  opts: HttpTransportOptions
+  handler: McpHttpHandler
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
@@ -112,72 +110,97 @@ async function handleRequest(
     return;
   }
 
-  const sessionId = headerString(req.headers[SESSION_HEADER]);
-
-  if (req.method === "GET" || req.method === "DELETE") {
-    // SSE streams + session termination — both routed by session.
-    const transport = sessionId ? transports.get(sessionId) : undefined;
-    if (!transport) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "unknown session" }));
-      return;
-    }
-    await transport.handleRequest(req, res);
-    return;
-  }
-
-  if (req.method !== "POST") {
-    res.writeHead(405, { "Content-Type": "application/json", Allow: "POST, GET, DELETE" });
-    res.end(JSON.stringify({ error: "method not allowed" }));
-    return;
-  }
-
-  const body = await readJsonBody(req);
-
-  // Re-use existing session, or initialise a new one when the client says so.
-  let transport = sessionId ? transports.get(sessionId) : undefined;
-  if (!transport && isInitializeRequest(body)) {
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (sid) => {
-        transports.set(sid, transport!);
-      },
-    });
-    transport.onclose = () => {
-      if (transport!.sessionId) transports.delete(transport!.sessionId);
-    };
-    await opts.connect(transport);
-  }
-
-  if (!transport) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        error: "no transport for request — pass an `Mcp-Session-Id` header or send `initialize`",
-      })
-    );
-    return;
-  }
-
-  await transport.handleRequest(req, res, body);
+  const response = await handler.fetch(await toWebRequest(req, url));
+  await writeWebResponse(res, response);
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+/** Adapt a `node:http` request to the web-standard `Request` the SDK takes. */
+async function toWebRequest(req: IncomingMessage, url: URL): Promise<Request> {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const v of value) headers.append(key, v);
+    } else {
+      headers.set(key, value);
+    }
+  }
+
+  const method = req.method ?? "GET";
+  const hasBody = method !== "GET" && method !== "HEAD";
+  const body = hasBody ? await readBody(req) : undefined;
+
+  return new Request(url.toString(), {
+    method,
+    headers,
+    ...(body !== undefined && body.length > 0 ? { body: new Uint8Array(body) } : {}),
+  });
+}
+
+async function readBody(req: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  if (chunks.length === 0) return undefined;
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw.trim()) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new Error("Invalid JSON request body");
-  }
+  return Buffer.concat(chunks);
 }
 
-function headerString(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
+/** Stream a web `Response` back out through the `node:http` response. */
+async function writeWebResponse(res: ServerResponse, response: Response): Promise<void> {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  res.writeHead(response.status, headers);
+
+  if (!response.body) {
+    res.end();
+    return;
+  }
+
+  // An SSE response streams indefinitely; piping chunk-by-chunk keeps it live
+  // instead of buffering a body that never completes.
+  const reader = response.body.getReader();
+
+  // A client that walks away must not leave the pump (and the SDK stream
+  // behind it) running forever.
+  let clientGone = false;
+  const onClose = () => {
+    clientGone = true;
+    void reader.cancel().catch(() => undefined);
+  };
+  res.on("close", onClose);
+  // ONE shared close promise, created here rather than per iteration: adding a
+  // `once("close")` inside the loop would accumulate listeners under sustained
+  // backpressure and trip the MaxListeners warning.
+  const closed = new Promise<void>((resolve) => res.once("close", resolve));
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done || clientGone) break;
+      if (!value) continue;
+      // Respect backpressure: without this a slow consumer buffers the whole
+      // stream in this process's memory.
+      if (!res.write(Buffer.from(value))) {
+        // Race the drain against the client going away. Node never emits
+        // `drain` on a DESTROYED response, so awaiting it alone strands this
+        // pump forever when a client disconnects mid-backpressure — holding
+        // the reader and the SDK stream behind it, and never reaching the
+        // `finally`. Cancelling the reader in `onClose` does not help: the
+        // loop is parked on `drain`, not on `read()`.
+        let onDrain!: () => void;
+        const drained = new Promise<void>((resolve) => {
+          onDrain = resolve;
+          res.once("drain", onDrain);
+        });
+        await Promise.race([drained, closed]);
+        res.off("drain", onDrain);
+        if (clientGone || res.destroyed) break;
+      }
+    }
+  } finally {
+    res.off("close", onClose);
+    res.end();
+  }
 }

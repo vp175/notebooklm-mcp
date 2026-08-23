@@ -1,4 +1,4 @@
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 
 /**
  * Library tools — manage the local catalogue of NotebookLM notebooks the
@@ -14,7 +14,7 @@ export const notebookManagementTools: Tool[] = [
       "queried with `ask_question`, ingested into with `add_source`, etc.\n\n" +
       "## Required URL\n" +
       "The user must supply a NotebookLM share-link. To produce one:\n" +
-      "  1. Open https://notebooklm.google\n" +
+      "  1. Open https://notebook.google.com\n" +
       '  2. Open the notebook → click "Share" (top right)\n' +
       '  3. Set "Anyone with the link" → "Copy link"\n\n' +
       "## Permission workflow\n" +

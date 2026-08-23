@@ -1,4 +1,4 @@
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 
 /**
  * System / auth / cleanup tools. The cross-tool first-run workflow lives in
@@ -75,9 +75,13 @@ export const systemTools: Tool[] = [
   {
     name: "setup_auth",
     description:
-      "Open a browser window for first-time Google login. Returns immediately " +
-      "after spawning the browser; the user has up to 10 minutes to complete " +
-      "sign-in, then cookies are persisted for future runs.\n\n" +
+      "Open a browser window for first-time Google login.\n\n" +
+      "**This call BLOCKS until the user finishes signing in** (up to 10 " +
+      "minutes) — it does not return as soon as the browser opens. Ask the " +
+      "user to complete the login in the window that appears; cookies are " +
+      "then persisted for future runs.\n\n" +
+      "It also CLOSES any live browser sessions and replaces the stored " +
+      "Chrome profile, so work in flight is ended.\n\n" +
       "When to use:\n" +
       "  • `get_health` reports `authenticated=false` for the first time\n" +
       "  • Auto-login credentials are not configured\n" +
@@ -112,7 +116,10 @@ export const systemTools: Tool[] = [
     annotations: {
       title: "Set up Google authentication",
       readOnlyHint: false,
-      destructiveHint: false,
+      // It wipes stored auth state and the Chrome profile and closes live
+      // sessions. Declaring destructiveHint:false told hosts that gate
+      // destructive tools the opposite of the truth.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -185,7 +192,7 @@ export const systemTools: Tool[] = [
         confirm: {
           type: "boolean",
           description:
-            "false (default) = preview only for a client without " +
+            "REQUIRED — there is no default. false = preview only for a client without " +
             "elicitation; for an elicitation-capable client, accepting the " +
             "resulting confirmation prompt deletes immediately regardless " +
             "of this being false. true = always deletes, no elicitation.",

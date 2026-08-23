@@ -1,1 +1,6 @@
 * text=auto eol=lf
+
+# Explicitly text: this file briefly contained literal control characters as
+# string separators, which made git render every change to it as a binary diff
+# and hid a protocol-error-handling change from review.
+src/resources/resource-handlers.ts text diff

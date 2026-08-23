@@ -1,12 +1,5 @@
-import {
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema,
-  CompleteRequestSchema,
-  ListPromptsRequestSchema,
-  GetPromptRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { INVALID_PARAMS, ProtocolError, ResourceNotFoundError } from "@modelcontextprotocol/server";
+import type { Server, ServerContext } from "@modelcontextprotocol/server";
 import type { NotebookLibrary } from "../library/notebook-library.js";
 import { log } from "../utils/logger.js";
 
@@ -65,7 +58,7 @@ function buildPromptMessages(
       },
     ];
   }
-  throw new Error(`Unknown prompt: ${name}`);
+  throw new ProtocolError(INVALID_PARAMS, `Unknown prompt: ${name}`);
 }
 
 /**
@@ -79,20 +72,55 @@ export class ResourceHandlers {
   }
 
   /**
+   * A stable fingerprint of the exposed resource list (ids + display names).
+   * Used to tell a real list change from a metadata-only save.
+   */
+  private resourceListKey(): string {
+    try {
+      return this.library
+        .listNotebooks()
+        .map((n) => `${n.id}\u0000${n.name ?? ""}`)
+        .sort()
+        .join("\u0001");
+    } catch {
+      // A library that cannot be read right now is not a list change.
+      return "\u0002unreadable";
+    }
+  }
+
+  /**
    * Register all resource handlers to the server
    */
   public registerHandlers(server: Server): void {
-    // Notify subscribed clients whenever the library changes on disk (add,
-    // remove, update, select, or use-count bump — all route through
-    // NotebookLibrary.saveLibrary, which fires this hook).
-    this.library.onChange(() => {
+    // Notify subscribed clients when the resource LIST changes.
+    //
+    // The hook itself fires on every library save — including a use-count bump
+    // on every single ask_question — so firing list_changed unconditionally
+    // sent a stream of notifications claiming the list changed when it had
+    // not. Compare the actual set of notebook ids and only notify on a real
+    // add/remove/rename.
+    let knownResourceKeys = this.resourceListKey();
+    const unsubscribe = this.library.onChange(() => {
+      const next = this.resourceListKey();
+      if (next === knownResourceKeys) return;
+      knownResourceKeys = next;
       void server.sendResourceListChanged().catch((error: unknown) => {
         log.warning(`⚠️  [MCP] Failed to send resources/list_changed: ${error}`);
       });
     });
 
+    // Drop the subscription when this connection ends. The HTTP transport
+    // builds a server instance PER EXCHANGE, so without this every request
+    // left a listener on the long-lived library, holding a dead server alive
+    // and adding another failing notify to every future mutation.
+    const previousOnClose = server.onclose?.bind(server);
+    server.onclose = () => {
+      unsubscribe();
+      previousOnClose?.();
+    };
+
     // List available resources
-    server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    server.setRequestHandler("resources/list", async () => {
       log.info("📚 [MCP] list_resources request received");
 
       const notebooks = this.library.listNotebooks();
@@ -146,7 +174,7 @@ export class ResourceHandlers {
     });
 
     // List resource templates
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+    server.setRequestHandler("resources/templates/list", async () => {
       log.info("📑 [MCP] list_resource_templates request received");
 
       return {
@@ -165,7 +193,7 @@ export class ResourceHandlers {
     });
 
     // Read resource content
-    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    server.setRequestHandler("resources/read", async (request, _ctx: ServerContext) => {
       const { uri } = request.params;
       log.info(`📖 [MCP] read_resource request: ${uri}`);
 
@@ -215,18 +243,25 @@ export class ResourceHandlers {
         const prefix = "notebooklm://library/";
         const encodedId = uri.slice(prefix.length);
         if (!encodedId) {
-          throw new Error("Notebook resource requires an ID (e.g. notebooklm://library/{id})");
+          throw new ProtocolError(
+            INVALID_PARAMS,
+            "Notebook resource requires an ID (e.g. notebooklm://library/{id})"
+          );
         }
 
         let id: string;
         try {
           id = decodeURIComponent(encodedId);
         } catch {
-          throw new Error(`Invalid notebook identifier encoding: ${encodedId}`);
+          throw new ProtocolError(
+            INVALID_PARAMS,
+            `Invalid notebook identifier encoding: ${encodedId}`
+          );
         }
 
         if (!/^[a-z0-9][a-z0-9-]{0,62}$/i.test(id)) {
-          throw new Error(
+          throw new ProtocolError(
+            INVALID_PARAMS,
             `Invalid notebook identifier: ${encodedId}. Notebook IDs may only contain letters, numbers, and hyphens.`
           );
         }
@@ -234,7 +269,12 @@ export class ResourceHandlers {
         const notebook = this.library.getNotebook(id);
 
         if (!notebook) {
-          throw new Error(`Notebook not found: ${id}`);
+          // A genuine resources/read MISS. Same wire code as any other invalid
+          // params (-32602, which is the 2026-07-28 MUST — the SDK never emits
+          // -32002 and maps a thrown one to -32602), but this class attaches
+          // `data: { uri }`, which is how a client is told to tell a
+          // not-found apart from an ordinary bad-argument error.
+          throw new ResourceNotFoundError(uri, `Notebook not found: ${id}`);
         }
 
         return {
@@ -253,7 +293,10 @@ export class ResourceHandlers {
         const active = this.library.getActiveNotebook();
 
         if (!active) {
-          throw new Error("No active notebook. Use notebooklm://library to see all notebooks.");
+          throw new ProtocolError(
+            INVALID_PARAMS,
+            "No active notebook. Use notebooklm://library to see all notebooks."
+          );
         }
 
         const metadata = {
@@ -281,7 +324,9 @@ export class ResourceHandlers {
 
       // Helpful error so misconfigured clients (issue #15 — reporter requested
       // `mcp://notebooklm`, which never existed) learn the supported URI scheme.
-      throw new Error(
+      // Also a genuine miss — the URI names no resource this server serves.
+      throw new ResourceNotFoundError(
+        uri,
         `Unknown resource: ${uri}. Supported URIs: notebooklm://library, ` +
           "notebooklm://library/{id}, notebooklm://metadata. " +
           "Call resources/list to discover the active set."
@@ -289,7 +334,7 @@ export class ResourceHandlers {
     });
 
     // Argument completions (for prompt arguments and resource templates)
-    server.setRequestHandler(CompleteRequestSchema, async (request) => {
+    server.setRequestHandler("completion/complete", async (request, _ctx: ServerContext) => {
       const { ref, argument } = request.params;
       try {
         if (ref.type === "ref/resource") {
@@ -308,18 +353,19 @@ export class ResourceHandlers {
     });
 
     // List available prompts
-    server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    server.setRequestHandler("prompts/list", async () => {
       log.info("📜 [MCP] list_prompts request received");
       return { prompts: PROMPTS.map((p) => ({ name: p.name, description: p.description })) };
     });
 
     // Get a specific prompt's messages
-    server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    server.setRequestHandler("prompts/get", async (request, _ctx: ServerContext) => {
       const { name } = request.params;
       log.info(`📜 [MCP] get_prompt request: ${name}`);
       const prompt = PROMPTS.find((p) => p.name === name);
       if (!prompt) {
-        throw new Error(
+        throw new ProtocolError(
+          INVALID_PARAMS,
           `Unknown prompt: ${name}. Supported: ${PROMPTS.map((p) => p.name).join(", ")}. ` +
             "Call prompts/list to discover the active set."
         );

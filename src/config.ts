@@ -57,8 +57,9 @@ export interface Config {
   /**
    * Hard ceiling on the wait for a NotebookLM answer (issue #14 + #27).
    * Long-form queries on notebooks with many sources legitimately exceed
-   * 2 min. Overridable via `ANSWER_TIMEOUT_MS` env or per-call via
-   * `browser_options.timeout_ms`.
+   * 2 min. Set with the `ANSWER_TIMEOUT_MS` env var ONLY — a caller's
+   * `browser_options.timeout_ms` maps to `browserTimeout` (the per-action
+   * Playwright timeout) and has never affected this value.
    */
   answerTimeoutMs: number;
   viewport: { width: number; height: number };

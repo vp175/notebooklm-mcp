@@ -18,7 +18,11 @@ import type { SharedContextManager } from "./shared-context-manager.js";
 import type { AuthManager } from "../auth/auth-manager.js";
 import { humanType, randomDelay } from "../utils/stealth-utils.js";
 import { snapshotAllResponses } from "../utils/page-utils.js";
-import { waitForStableAnswer, snapshotPriorAnswers } from "../notebooklm/chat.js";
+import {
+  waitForStableAnswer,
+  snapshotPriorAnswers,
+  countAnswerContainers,
+} from "../notebooklm/chat.js";
 import {
   extractCitations as extractCitationsFromPage,
   type SourceFormat,
@@ -435,6 +439,9 @@ export class BrowserSession {
       // (issue #43). Falls back to the legacy snapshot only if the v2 helper
       // produced nothing, so we don't regress when the new selectors miss.
       log.info(`  📸 Snapshotting existing responses...`);
+      // Count BEFORE the question is submitted: the wait uses growth in the
+      // container count as its primary signal that a new answer arrived.
+      const priorAnswerCount = await countAnswerContainers(page);
       let existingResponses = await snapshotPriorAnswers(page);
       if (existingResponses.length === 0) {
         existingResponses = await snapshotAllResponses(page);
@@ -469,8 +476,9 @@ export class BrowserSession {
       await randomDelay(1000, 1500);
 
       // Wait for the response with streaming-stability detection (issue #43).
-      // Timeout comes from CONFIG.answerTimeoutMs so users can tune it via
-      // ANSWER_TIMEOUT_MS or browser_options.timeout_ms (issue #14, #27).
+      // Timeout comes from CONFIG.answerTimeoutMs, which only the
+      // ANSWER_TIMEOUT_MS env var sets — `browser_options.timeout_ms` maps to
+      // the per-action browserTimeout and does NOT extend this wait.
       log.info(`  ⏳ Waiting for response (streaming-stability)...`);
       await sendProgress?.("Waiting for NotebookLM response (streaming-stability)...", 3, 5);
       const answer = await waitForStableAnswer(page, {
@@ -478,6 +486,7 @@ export class BrowserSession {
         timeoutMs: CONFIG.answerTimeoutMs,
         pollIntervalMs: 750,
         ignoreTexts: existingResponses,
+        priorAnswerCount,
       });
 
       if (!answer) {

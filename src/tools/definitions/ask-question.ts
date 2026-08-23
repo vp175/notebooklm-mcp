@@ -1,4 +1,4 @@
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import type { NotebookLibrary } from "../../library/notebook-library.js";
 import { getTopicsLine, getUseCaseBullets } from "../../library/metadata.js";
 
@@ -100,7 +100,7 @@ ${bt}${bt}${bt}
     return `# Conversational Research Partner (NotebookLM • Gemini 2.5 • Session RAG)
 
 ## No Active Notebook
-- Visit https://notebooklm.google to create a notebook and get a share link
+- Visit https://notebook.google.com to create a notebook and get a share link
 - Use **add_notebook** to add it to your library (explains how to get the link)
 - Use **list_notebooks** to show available sources
 - Use **select_notebook** to set one active

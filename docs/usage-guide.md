@@ -1,6 +1,8 @@
 # Usage Guide
 
-Practical end-to-end walkthroughs against v2.0.0. Each section is a self-contained recipe with the exact tool calls / curl commands.
+Practical end-to-end walkthroughs. Each section is a self-contained recipe with the exact tool calls / curl commands.
+
+The `npx notebooklm-mcp@latest` lines below start the **upstream** published package. The Studio-output tools and `discover_notebooks` described here exist only in this fork — run it with `node /absolute/path/to/notebooklm-mcp-fork/dist/index.js` instead. See [Install](../README.md#install).
 
 - [First-time setup](#first-time-setup)
 - [Multi-turn session pattern](#multi-turn-session-pattern)
@@ -23,7 +25,9 @@ Wire it into your MCP client of choice (see the [README](../README.md#connect-to
 
 ### 2. Authenticate
 
-Call `setup_auth`. A Chrome window opens. Log in to the Google account that owns the NotebookLM notebooks you want to query. Close the browser when done.
+Call `setup_auth`. A Chrome window opens. Log in to the Google account that owns the NotebookLM notebooks you want to query.
+
+**The tool call blocks until the login completes**, for up to 10 minutes — it does not return when the window opens, so expect it to stay outstanding while you sign in. Before starting, it closes every live browser session and replaces the stored Chrome profile; it is annotated `destructiveHint: true` for that reason, and a client that gates destructive tools may ask you to approve it first.
 
 ```json
 { "name": "setup_auth", "arguments": {} }
@@ -39,13 +43,13 @@ Expect `"authenticated": true`.
 
 ### 3. Add a notebook to the local library
 
-Get a NotebookLM share-URL: open the notebook in `notebooklm.google.com`, click _Share → Anyone with the link → Copy link_. Then:
+Get a NotebookLM share-URL: open the notebook at `notebook.google.com`, click _Share → Anyone with the link → Copy link_. (The legacy `notebooklm.google.com` host still redirects there, and URLs on it are accepted and normalised.) Then:
 
 ```json
 {
   "name": "add_notebook",
   "arguments": {
-    "url": "https://notebooklm.google.com/notebook/abcd-efgh",
+    "url": "https://notebook.google.com/notebook/abcd-efgh",
     "name": "n8n Documentation",
     "description": "n8n core docs + builtin nodes",
     "topics": ["workflow automation", "n8n", "node configuration"],
@@ -66,7 +70,7 @@ Get a NotebookLM share-URL: open the notebook in `notebooklm.google.com`, click 
 }
 ```
 
-Capture `session_id` from the response — you will reuse it for follow-ups.
+Capture `data.session_id` from the response — you will reuse it for follow-ups. If you later pass a `session_id` this server no longer knows (it expired, or the server restarted), the call does not fail: a new session answers and the result carries a `session_note` telling you the earlier context is gone.
 
 ---
 
@@ -79,31 +83,31 @@ Reusing `session_id` keeps NotebookLM's conversational context. The browser sess
 { "name": "ask_question", "arguments": {
   "question": "Give me an overview of the n8n error handling architecture."
 }}
-// → response.session_id = "ses_abc123"
+// → response.session_id = "a3f19c2b"
 
 // 2. Drill in
 { "name": "ask_question", "arguments": {
   "question": "What's the recommended retry/backoff pattern for HTTP nodes?",
-  "session_id": "ses_abc123"
+  "session_id": "a3f19c2b"
 }}
 
 // 3. Edge cases
 { "name": "ask_question", "arguments": {
   "question": "Common pitfalls when retrying webhook-triggered workflows?",
-  "session_id": "ses_abc123"
+  "session_id": "a3f19c2b"
 }}
 
 // 4. Production sample
 { "name": "ask_question", "arguments": {
   "question": "Show me a production example combining retry + circuit-breaker.",
-  "session_id": "ses_abc123"
+  "session_id": "a3f19c2b"
 }}
 ```
 
 When the task changes, either:
 
-- Reset the same session: `{ "name": "reset_session", "arguments": { "session_id": "ses_abc123" } }`
-- Close it: `{ "name": "close_session", "arguments": { "session_id": "ses_abc123" } }` — and start a new one with no `session_id`.
+- Reset the same session: `{ "name": "reset_session", "arguments": { "session_id": "a3f19c2b" } }`
+- Close it: `{ "name": "close_session", "arguments": { "session_id": "a3f19c2b" } }` — and start a new one with no `session_id`.
 
 Sessions auto-expire after `SESSION_TIMEOUT` seconds of inactivity (default `900` = 15 min).
 
@@ -143,22 +147,38 @@ Response (abridged):
 {
   "answer": "[AI-GENERATED ...] Refresh tokens are rotated on every refresh request [1]. The previous token is revoked server-side [2].\n\nSources:\n[1] auth-spec.pdf — \"Refresh tokens MUST be rotated…\"\n[2] auth-spec.pdf — \"On rotation, the previous token MUST be invalidated…\"",
   "sources": [
-    { "index": 1, "title": "auth-spec.pdf", "excerpt": "Refresh tokens MUST be rotated…" },
-    { "index": 2, "title": "auth-spec.pdf", "excerpt": "On rotation, the previous token MUST be invalidated…" }
+    {
+      "marker": "[1]",
+      "number": 1,
+      "sourceName": "auth-spec.pdf",
+      "sourceText": "Refresh tokens MUST be rotated…"
+    },
+    {
+      "marker": "[2]",
+      "number": 2,
+      "sourceName": "auth-spec.pdf",
+      "sourceText": "On rotation, the previous token MUST be invalidated…"
+    }
   ],
   "source_format": "footnotes"
 }
 ```
 
+The fields are `marker`, `number`, `sourceName`, `sourceText` — `sourceText` is a best-effort excerpt and falls back to `sourceName` when the highlighted passage cannot be read. There is no `url`.
+
 ### `json`
 
 Answer text is left untouched. Citations are returned only as a structured array on `sources`. Use this when you want to render citations yourself.
+
+### When nothing comes back
+
+If you asked for citations and none could be read, the result carries a `sources_note` saying so rather than simply omitting `sources` — which used to be indistinguishable from "citations were not requested". Extraction is bounded and never fails the question: a citation problem degrades to a missing excerpt, not a failed `ask_question`.
 
 ---
 
 ## Audio Overview generation + download
 
-Two-step workflow.
+Three steps: generate, poll, download. `generate_audio` is **non-blocking by default** — it returns as soon as generation has been triggered, not when the audio is ready.
 
 ### 1. Generate
 
@@ -166,28 +186,49 @@ Two-step workflow.
 {
   "name": "generate_audio",
   "arguments": {
-    "custom_prompt": "Focus on the migration steps and breaking changes",
-    "timeout_ms": 900000
+    "custom_prompt": "Focus on the migration steps and breaking changes"
   }
 }
 ```
 
-Generation can take several minutes — keep `timeout_ms` generous. The default is 600 000 ms (10 min).
+You get back `data.result.status` of `started` (generation kicked off), `in_progress` (one was already running, this call attached to it), or `ready` with `alreadyExisted: true` (one already existed; nothing was triggered). `data.session_id` names the session that did the work — reuse it on the next two calls to skip the 10–15 s page load, and `close_session` it at the end.
 
-### 2. Download
+To block instead, pass `wait_for_completion: true`; only then is `timeout_ms` read (default 600 000 ms / 10 min, hard-capped at 30 min):
+
+```json
+{
+  "name": "generate_audio",
+  "arguments": { "wait_for_completion": true, "timeout_ms": 900000 }
+}
+```
+
+### 2. Poll
+
+```json
+{ "name": "get_audio_status", "arguments": { "session_id": "a3f19c2b" } }
+```
+
+Poll about every 30 s. Real generations run several minutes — roughly 7 minutes was measured live. Keep polling until `data.result.status` is `ready`.
+
+`not_started` does **not** mean nothing is happening: it is also what you get while a generation is running but its tile has not yet appeared. Never read it as permission to trigger a second generation.
+
+### 3. Download
 
 ```json
 {
   "name": "download_audio",
   "arguments": {
-    "destination_dir": "/Users/me/Downloads/notebooklm"
+    "destination_dir": "/Users/me/Downloads/notebooklm",
+    "session_id": "a3f19c2b"
   }
 }
 ```
 
-Result includes the absolute `file_path` and size in bytes.
+`data.result` carries `success`, `filePath` (the absolute path actually written — it can differ from the suggested name when an existing file forced a ` (2)`-style non-clashing name), `bytes` (size on disk of the written file), and an optional `message`. There is no `file_path` field; the key is camelCase.
 
-If you call `download_audio` before any Audio Overview has been generated, the call returns an error pointing at `generate_audio`. Run them in order, in the same notebook.
+If you call `download_audio` before the status is `ready`, the call returns an error pointing at `generate_audio`. Run the three steps in order, against the same notebook.
+
+The same three-step shape works for the other implemented Studio outputs via `generate_studio_output` → `get_studio_output_status` → `download_studio_output` (file kinds: `audio`, `video`, `slides`, `infographic`) or `get_studio_output_content` (structured kinds: `mindmap`, `datatable`, `quiz`, `flashcards`). Only `report` is unimplemented.
 
 ---
 
@@ -219,15 +260,39 @@ There is no shared library between accounts — each account has its own `librar
 Start the server in HTTP mode:
 
 ```bash
-npx notebooklm-mcp@latest --transport http --port 3000 --host 0.0.0.0
+npx notebooklm-mcp@latest --transport http --port 3000
 ```
 
-The two operations:
+### Security — read before binding to anything but localhost
 
-| Method | Path |
-|---|---|
-| `POST` | `/mcp` |
-| `GET` | `/healthz` |
+**The HTTP transport has no authentication and no `Host`/`Origin` validation.** There is no token, no allow-list, no DNS-rebinding protection. Anything that can open a TCP connection to the port has the full tool set: it can read every notebook in the library, spend the account's daily NotebookLM quota, and call `cleanup_data`.
+
+Bind it to `127.0.0.1` (the default) and leave it there, or put it behind a reverse proxy that authenticates before forwarding. `--host 0.0.0.0` exposes an unauthenticated server on every interface — only do it inside a network you fully control, and preferably not even then.
+
+### Routes
+
+The transport serves four routes, not two:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/mcp` | JSON-RPC requests and responses. Creates a session when the body is an `initialize` request; otherwise requires a known `Mcp-Session-Id`. |
+| `GET` | `/mcp` | SSE stream for server→client messages. Requires a known `Mcp-Session-Id`. |
+| `DELETE` | `/mcp` | Terminate a session. Requires a known `Mcp-Session-Id`. |
+| `GET` | `/healthz` | Liveness probe. Returns `{"status":"ok","protocol":"mcp-streamable-http"}` — no version, no auth state. |
+
+Session routing uses the `Mcp-Session-Id` header, read case-insensitively; a value that arrives as an array resolves to its first entry.
+
+Other responses:
+
+- Any path other than `/mcp` or `GET /healthz` → `404` `{"error":"not found","expected":"/mcp"}`.
+- Any other method on `/mcp` → `405` with `Allow: POST, GET, DELETE`.
+- `GET` / `DELETE` `/mcp` with a missing or unknown session id → `404` `{"error":"unknown session"}`.
+- A non-`initialize` `POST /mcp` with no usable session → `400`, telling you to pass `Mcp-Session-Id` or send `initialize`.
+- A malformed JSON body, or any unhandled error → `500` `{"error":"internal server error"}`.
+
+Each session gets its **own** MCP `Server` instance. The SDK binds a `Server` to exactly one transport, so re-using one made the second concurrent client fail with "already connected" and receive a 500 — the multi-session support the transport advertised did not actually exist. All real state (browser context, browser sessions, the notebook library) stays shared across sessions.
+
+Limits worth knowing: sessions live only in process memory, so restarting the server invalidates all of them; there is no request size limit, no rate limiting, and no per-session isolation of the underlying Chrome — two HTTP clients share one browser and one NotebookLM account.
 
 ### 1. Initialize a session
 
@@ -279,6 +344,6 @@ curl http://localhost:3000/healthz
 
 ### Notes
 
-- The default bind address is `127.0.0.1`. Bind to `0.0.0.0` only on a trusted network.
+- The default bind address is `127.0.0.1`. There is no authentication — see [Security](#security--read-before-binding-to-anything-but-localhost) above before changing it.
 - Sessions are kept in process memory; restarting the server invalidates all sessions.
 - For n8n, Zapier, and similar HTTP-only callers, an "HTTP Request" node configured with a per-execution session-id store is enough — initialize once at workflow start, reuse the session for the rest of the run, and let the `DELETE /mcp` route close it cleanly at the end.
