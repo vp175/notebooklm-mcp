@@ -960,6 +960,30 @@ export async function downloadStudioOutput(
   }
 }
 
+/**
+ * A TRANSIENT frame error, not a broken page.
+ *
+ * Structured viewers render in a sandboxed iframe that NotebookLM attaches and
+ * detaches around the content. A locator evaluated in the instant a frame is
+ * being torn down fails inside Playwright itself — "Cannot read properties of
+ * undefined (reading 'injectedScript')" — or reports the frame as detached.
+ * Nothing is wrong with the session: the same read succeeds immediately after.
+ * Observed live at roughly one read in four when reading the same output
+ * repeatedly in one session.
+ *
+ * Distinct from `isRecoverable`, which means "this page/browser is gone,
+ * rebuild the session".
+ */
+function isTransientFrameError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return (
+    /injectedScript/i.test(msg) ||
+    /frame was detached/i.test(msg) ||
+    /Frame has been detached/i.test(msg) ||
+    /Execution context was destroyed/i.test(msg)
+  );
+}
+
 export async function getStudioOutputContent(
   page: Page,
   type: StudioOutputType
@@ -975,29 +999,51 @@ export async function getStudioOutputContent(
           : `"${type}" has no structured-content flow in this server (structured kinds: ${STRUCTURED_KIND_TYPES.join(", ")}).`,
     };
   }
-  try {
-    await preflightCloseViewer(page, `get_studio_output_content("${type}")`);
-    if (!(await readyOnColdPage(page, strategy))) {
-      return {
-        success: false,
-        message: `No completed "${type}" output found. Call generate_studio_output first and wait for get_studio_output_status to report "ready".`,
-      };
-    }
+  // One retry for a viewer-iframe teardown race (see `isTransientFrameError`).
+  // Bounded at two attempts: a genuine failure must still surface promptly.
+  const MAX_ATTEMPTS = 2;
+  let lastTransient: unknown;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const content = await strategy.extractContent(page);
-      return { success: true, content };
-    } finally {
-      // Extraction OPENS a viewer; if it is not closed here every later
-      // Studio call in this session breaks (live-observed cascade: mindmap
-      // OK → flashcards "No completed output found" → mindmap now failing
-      // too → audio status wrongly `not_started`). `finally`, so the error
-      // path cleans up as well.
-      await closeStructuredViewer(page);
+      await preflightCloseViewer(page, `get_studio_output_content("${type}")`);
+      if (!(await readyOnColdPage(page, strategy))) {
+        return {
+          success: false,
+          message: `No completed "${type}" output found. Call generate_studio_output first and wait for get_studio_output_status to report "ready".`,
+        };
+      }
+      try {
+        const content = await strategy.extractContent(page);
+        return { success: true, content };
+      } finally {
+        // Extraction OPENS a viewer; if it is not closed here every later
+        // Studio call in this session breaks (live-observed cascade: mindmap
+        // OK → flashcards "No completed output found" → mindmap now failing
+        // too → audio status wrongly `not_started`). `finally`, so the error
+        // path cleans up as well.
+        await closeStructuredViewer(page);
+      }
+    } catch (err) {
+      if (isRecoverable(err)) throw err;
+      if (isTransientFrameError(err) && attempt < MAX_ATTEMPTS) {
+        lastTransient = err;
+        log.warning(
+          `  ⚠️  Studio "${type}" content read hit a viewer-frame teardown race — retrying once`
+        );
+        await safeSleep(page, 1_000);
+        continue;
+      }
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
     }
-  } catch (err) {
-    if (isRecoverable(err)) throw err;
-    return { success: false, message: err instanceof Error ? err.message : String(err) };
   }
+
+  // Unreachable in practice: the loop either returns or rethrows.
+  return {
+    success: false,
+    message:
+      lastTransient instanceof Error ? lastTransient.message : String(lastTransient ?? "unknown"),
+  };
 }
 
 /* ------------------------------------------------------------------ *
