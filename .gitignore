@@ -51,3 +51,6 @@ studio-*.png
 
 # Local review/verification scratch (SDD reports, downloaded artefacts)
 .superpowers/
+
+# Harness run artefacts
+tools/harness/out/
