@@ -14,6 +14,7 @@ import type {
   UpdateNotebookInput,
 } from "../library/types.js";
 import type { AddSourceResult } from "../notebooklm/sources.js";
+import { discoverNotebooks, type DiscoveredNotebook } from "../notebooklm/discovery.js";
 import type { AudioGenerationResult, DownloadAudioResult } from "../notebooklm/audio.js";
 import type { StudioOutputType } from "../notebooklm/studio-outputs.js";
 import { isStudioTypeImplemented, implementedStudioTypes } from "../notebooklm/studio-outputs.js";
@@ -655,6 +656,46 @@ export class ToolHandlers {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] add_notebook failed: ${errorMessage}`);
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Handle discover_notebooks tool
+   */
+  async handleDiscoverNotebooks(): Promise<
+    ToolResult<{
+      discovered: DiscoveredNotebook[];
+      added: NotebookEntry[];
+      skipped_existing: number;
+      note?: string;
+    }>
+  > {
+    log.info(`🔧 [TOOL] discover_notebooks called`);
+
+    try {
+      const statePath = await this.authManager.getValidStatePath();
+      if (!statePath) {
+        throw new Error("Not authenticated — run setup_auth first, then retry discover_notebooks.");
+      }
+
+      const context = await this.sessionManager.getSharedContext();
+      const { notebooks: discovered, note } = await discoverNotebooks(context);
+      const { added, skipped_existing } = this.library.syncDiscovered(discovered);
+
+      log.success(
+        `✅ [TOOL] discover_notebooks completed: ${discovered.length} found, ${added.length} newly registered, ${skipped_existing} already known`
+      );
+      return {
+        success: true,
+        data: { discovered, added, skipped_existing, ...(note && { note }) },
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log.error(`❌ [TOOL] discover_notebooks failed: ${errorMessage}`);
       return {
         success: false,
         error: errorMessage,

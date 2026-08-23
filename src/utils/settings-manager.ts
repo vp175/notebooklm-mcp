@@ -46,6 +46,7 @@ const PROFILES: Record<ProfileName, string[]> = {
     "setup_auth",
     "list_sessions",
     "add_notebook",
+    "discover_notebooks",
     "update_notebook",
     "search_notebooks",
     "get_studio_output_status",

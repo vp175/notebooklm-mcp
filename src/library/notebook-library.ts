@@ -18,6 +18,18 @@ import type {
   LibraryStats,
 } from "./types.js";
 
+/**
+ * Extract the notebook UUID from a NotebookLM/Gemini Notebook URL, e.g.
+ * "https://notebook.google.com/notebook/<uuid>" or the legacy
+ * "https://notebooklm.google.com/notebook/<uuid>?authuser=0". Used to dedupe
+ * discovered notebooks against the library by identity, not by name/title
+ * (titles can collide or get renamed in the account after being registered).
+ */
+export function extractNotebookId(url: string): string | null {
+  const match = url.match(/\/notebook\/([a-f0-9-]{36})/i);
+  return match ? match[1] : null;
+}
+
 export class NotebookLibrary {
   private libraryPath: string;
   private library: Library;
@@ -340,6 +352,84 @@ export class NotebookLibrary {
       total_queries: totalQueries,
       last_modified: this.library.last_modified,
     };
+  }
+
+  /**
+   * Register any discovered notebooks (from the account's dashboard) that
+   * aren't already in the library. Dedupes by the notebook UUID parsed
+   * from the URL via extractNotebookId, so calling this repeatedly with
+   * the same account state is always safe — already-registered notebooks
+   * are silently skipped, never duplicated or overwritten.
+   */
+  syncDiscovered(discovered: Array<{ id: string; url: string; title: string }>): {
+    added: NotebookEntry[];
+    skipped_existing: number;
+  } {
+    const existingUuids = new Set(
+      this.library.notebooks
+        .map((n) => extractNotebookId(n.url))
+        .filter((id): id is string => id !== null)
+    );
+
+    // Local slug generator (seeded from current + newly-added ids): the
+    // class's own generateId() checks this.library.notebooks, which is
+    // stale mid-batch — it wouldn't see slugs assigned earlier in this
+    // same loop, before saveLibrary() commits them.
+    const usedSlugs = new Set(this.library.notebooks.map((n) => n.id));
+    const slugify = (name: string): string => {
+      const base =
+        name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .substring(0, 30) || "notebook";
+      let id = base;
+      let counter = 1;
+      while (usedSlugs.has(id)) {
+        id = `${base}-${counter}`;
+        counter++;
+      }
+      usedSlugs.add(id);
+      return id;
+    };
+
+    const updated: Library = { ...this.library, notebooks: [...this.library.notebooks] };
+    const added: NotebookEntry[] = [];
+
+    for (const d of discovered) {
+      if (existingUuids.has(d.id)) continue;
+
+      const entry: NotebookEntry = {
+        id: slugify(d.title),
+        url: d.url,
+        name: d.title,
+        description: `Auto-discovered from your NotebookLM account: ${d.title}`,
+        topics: [],
+        content_types: ["documentation", "examples"],
+        use_cases: [`Answering questions about ${d.title}`],
+        added_at: new Date().toISOString(),
+        last_used: new Date().toISOString(),
+        use_count: 0,
+        tags: ["auto-discovered"],
+      };
+
+      updated.notebooks.push(entry);
+      added.push(entry);
+      existingUuids.add(d.id);
+    }
+
+    if (!updated.active_notebook_id && updated.notebooks.length > 0) {
+      updated.active_notebook_id = updated.notebooks[0].id;
+    }
+
+    if (added.length > 0) {
+      this.saveLibrary(updated);
+      log.success(
+        `✅ Synced ${added.length} discovered notebook(s), skipped ${discovered.length - added.length} already registered`
+      );
+    }
+
+    return { added, skipped_existing: discovered.length - added.length };
   }
 
   /**

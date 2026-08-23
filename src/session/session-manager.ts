@@ -57,6 +57,15 @@ export class SessionManager {
   }
 
   /**
+   * Get the shared authenticated browser context directly, without
+   * creating a per-notebook session. For tools that operate on the
+   * account level (e.g. discover_notebooks) rather than one notebook.
+   */
+  async getSharedContext(overrideHeadless?: boolean) {
+    return this.sharedContextManager.getOrCreateContext(overrideHeadless);
+  }
+
+  /**
    * Get existing session or create a new one
    *
    * @param sessionId Optional session ID to reuse existing session

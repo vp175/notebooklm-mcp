@@ -33,9 +33,10 @@ export const notebookManagementTools: Tool[] = [
         url: {
           type: "string",
           description:
-            "NotebookLM share URL. Format: " +
-            "`https://notebooklm.google.com/notebook/<uuid>` (with optional " +
-            "`?authuser=N` suffix).",
+            "NotebookLM (Gemini Notebook) share URL. Format: " +
+            "`https://notebook.google.com/notebook/<uuid>` (with optional " +
+            "`?authuser=N` suffix). The legacy `notebooklm.google.com` domain " +
+            "still redirects and is also accepted.",
         },
         name: {
           type: "string",
@@ -76,6 +77,33 @@ export const notebookManagementTools: Tool[] = [
       destructiveHint: false,
       idempotentHint: false,
       openWorldHint: false,
+    },
+  },
+  {
+    name: "discover_notebooks",
+    description:
+      "Scan the account's NotebookLM dashboard (the notebooks visible at " +
+      "https://notebook.google.com/ when signed in) and register any that " +
+      "aren't already in the local library — notebooks the user created " +
+      "directly in the web UI, which `add_notebook` alone can never see " +
+      "since it only stores whatever URL it's handed.\n\n" +
+      "Safe to call repeatedly: dedupes by the notebook's UUID, so already-" +
+      "registered notebooks are skipped, never duplicated. Newly-discovered " +
+      "notebooks get placeholder metadata (empty `topics`, a generic " +
+      "`description`, the `auto-discovered` tag) — follow up with " +
+      "`update_notebook` to fill those in once you know what each contains.\n\n" +
+      "Requires an authenticated session (`get_health` → `authenticated:true`; " +
+      "if not, run `setup_auth` first).",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+    annotations: {
+      title: "Discover notebooks from account",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
     },
   },
   {

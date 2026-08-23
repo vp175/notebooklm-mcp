@@ -22,10 +22,30 @@ const paths = envPaths("notebooklm-mcp", { suffix: "" });
 
 /**
  * Google NotebookLM Auth URL (used by setup_auth)
- * This is the base Google login URL that redirects to NotebookLM
+ * This is the base Google login URL that redirects to NotebookLM.
+ *
+ * Google renamed the product to "Gemini Notebook" and moved the app to
+ * notebook.google.com (confirmed live 2026-08-23 — the old domain still
+ * 302s to the new one, but continue= points straight at the live domain
+ * to avoid depending on that redirect staying in place).
  */
 export const NOTEBOOKLM_AUTH_URL =
-  "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fnotebooklm.google.com%2F&flowName=GlifWebSignIn&flowEntry=ServiceLogin";
+  "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fnotebook.google.com%2F&flowName=GlifWebSignIn&flowEntry=ServiceLogin";
+
+/**
+ * Both domains the app is reachable at. notebooklm.google.com (legacy,
+ * still redirects) and notebook.google.com (current, post-rename). Treat
+ * a URL as "on the app" if it starts with either — never match on just
+ * one, since the redirect target has already changed once.
+ */
+export const NOTEBOOK_APP_DOMAINS = [
+  "https://notebook.google.com/",
+  "https://notebooklm.google.com/",
+] as const;
+
+export function isNotebookAppUrl(url: string): boolean {
+  return NOTEBOOK_APP_DOMAINS.some((domain) => url.startsWith(domain));
+}
 
 export interface Config {
   // NotebookLM - optional, used for legacy default notebook
