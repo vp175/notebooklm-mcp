@@ -19,7 +19,7 @@
  * be a general-purpose JSON-Schema engine.
  */
 
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 
 /** JSON-Schema fragment shape, narrowed to what we actually read. */
 interface SchemaNode {

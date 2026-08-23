@@ -30,15 +30,14 @@
  * Based on the Python NotebookLM API implementation
  */
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { Tool, ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
 import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from "@modelcontextprotocol/sdk/types.js";
+  METHOD_NOT_FOUND,
+  ProtocolError,
+  Server,
+  isInputRequiredResult,
+} from "@modelcontextprotocol/server";
+import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server/stdio";
+import type { ServerContext, Tool } from "@modelcontextprotocol/server";
 
 import type { ProgressCallback } from "./types.js";
 import { AuthManager } from "./auth/auth-manager.js";
@@ -53,7 +52,6 @@ import { CliHandler } from "./utils/cli-handler.js";
 import { CONFIG, ensureDirectories } from "./config.js";
 import { startHttpTransport } from "./transport/http.js";
 import { log } from "./utils/logger.js";
-import { ElicitationRequestError } from "./errors.js";
 
 /**
  * Server-level instructions consumed by MCP clients during initialization.
@@ -198,6 +196,27 @@ function readProgressToken(meta: unknown): string | number | undefined {
 }
 
 /**
+ * A confirmation round-trip, as the tool handlers see it.
+ *
+ * `canElicit` is whether this client can answer a confirmation at all;
+ * `responses` carries the answers a retried call brought back (the
+ * multi-round-trip flow of protocol revision 2026-07-28, which the SDK also
+ * serves to 2025-era clients through its legacy elicitation shim).
+ */
+export interface ConfirmContext {
+  canElicit: boolean;
+  responses?: Record<string, unknown>;
+}
+
+type ToolDispatchEntry = (
+  args: Record<string, unknown> | undefined,
+  sendProgress: ProgressCallback,
+  confirm: ConfirmContext
+) => Promise<unknown>;
+
+type ToolDispatch = Map<string, ToolDispatchEntry>;
+
+/**
  * Main MCP Server Class
  */
 class NotebookLMMCPServer {
@@ -215,6 +234,8 @@ class NotebookLMMCPServer {
   private stdinShutdownHook?: () => void;
   /** Closeable handle for the HTTP transport, when that transport is in use. */
   private httpHandle?: { close: () => Promise<void> };
+  /** Closeable handle for the stdio entry, when that transport is in use. */
+  private stdioHandle?: StdioServerHandle;
 
   constructor() {
     // Initialize managers (shared by every connection)
@@ -291,62 +312,20 @@ class NotebookLMMCPServer {
       }
     );
 
-    // Initialize handlers
+    // Initialize handlers.
     //
-    // The elicit callback is wired unconditionally — `this.elicit` inside
-    // ToolHandlers is always defined — but it internally gates on the
-    // client's *declared* capability (checked at call time, since capabilities
-    // are only known after the initialize handshake, which happens after this
-    // constructor runs). The two failure modes below are deliberately kept
-    // distinguishable rather than both collapsing to `undefined`:
+    // Confirmation prompts are NOT a server→client request any more. The
+    // 2026-07-28 revision removed that channel entirely: a handler that needs
+    // user input returns `inputRequired(...)` and the client re-calls the tool
+    // with the answers attached. The SDK's legacy shim turns the same return
+    // value into a real `elicitation/create` request for 2025-era clients, so
+    // one code path serves both eras and the old elicit callback is gone.
     //
-    //   1. Capability not declared at all → resolves to `undefined`. This is
-    //      NOT an error: the client never offered elicitation, so handlers.ts
-    //      treats it as "elicitation unusable — fall through to
-    //      pre-elicitation behavior", never as a decline. This matters
-    //      because the SDK's `elicitInput` does NOT reject synchronously for
-    //      an unsupported capability by default (only when
-    //      `enforceStrictCapabilities: true` is set, which this server does
-    //      not set) — it sends the request over the transport and lets the
-    //      client's response (or lack of a handler) determine the outcome,
-    //      which for a non-elicitation client is a rejected promise we must
-    //      not let escape as a crashed tool call.
-    //   2. Capability declared, but the `elicitInput` request itself failed
-    //      (rejected, errored, or — very plausibly, since the SDK's default
-    //      request timeout is 60s and a human reading a confirmation dialog
-    //      can easily take longer — timed out) → throws
-    //      `ElicitationRequestError` instead of swallowing to `undefined`.
-    //      Callers that need fail-closed behavior on a failed confirmation
-    //      (e.g. `remove_notebook`, a destructive tool) must catch this
-    //      specific error type and refuse to proceed rather than treating a
-    //      failed request the same as "capability not declared".
-    const toolHandlers = new ToolHandlers(
-      this.sessionManager,
-      this.authManager,
-      this.library,
-      async (message, schema) => {
-        if (!server.getClientCapabilities()?.elicitation) {
-          return undefined;
-        }
-        try {
-          // Callers (handlers.ts) build these schema literals inline as
-          // `Record<string, unknown>` and are not coupled to the SDK's exact
-          // (discriminated-union) requestedSchema type — the handlers only
-          // ever pass a valid `{ type: "object", properties, required }`
-          // shape, so this cast is safe.
-          return await server.elicitInput({
-            message,
-            requestedSchema: schema as ElicitRequestFormParams["requestedSchema"],
-          });
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          log.warning(`Elicitation request failed: ${errorMessage}`);
-          throw new ElicitationRequestError(
-            `Elicitation request failed or timed out: ${errorMessage}`
-          );
-        }
-      }
-    );
+    // What the handler still needs from the connection is (a) whether this
+    // client can answer at all, so a client with no elicitation capability
+    // keeps the old fall-through behaviour instead of getting a capability
+    // error, and (b) the answers carried by a retried call.
+    const toolHandlers = new ToolHandlers(this.sessionManager, this.authManager, this.library);
 
     this.setupHandlers(server, this.buildToolDispatch(toolHandlers));
     return { server, toolHandlers };
@@ -370,20 +349,9 @@ class NotebookLMMCPServer {
    * from its own declaration in `handlers.ts`, so it cannot silently drift
    * out of sync with the handler signatures.
    */
-  private buildToolDispatch(
-    handlers: ToolHandlers
-  ): Map<
-    string,
-    (args: Record<string, unknown> | undefined, sendProgress: ProgressCallback) => Promise<unknown>
-  > {
+  private buildToolDispatch(handlers: ToolHandlers): ToolDispatch {
     const h = handlers;
-    return new Map<
-      string,
-      (
-        args: Record<string, unknown> | undefined,
-        sendProgress: ProgressCallback
-      ) => Promise<unknown>
-    >([
+    return new Map<string, ToolDispatchEntry>([
       [
         "ask_question",
         (args, sendProgress) =>
@@ -410,7 +378,8 @@ class NotebookLMMCPServer {
       ],
       [
         "remove_notebook",
-        (args) => h.handleRemoveNotebook(args as Parameters<typeof h.handleRemoveNotebook>[0]),
+        (args, _sendProgress, confirm) =>
+          h.handleRemoveNotebook(args as Parameters<typeof h.handleRemoveNotebook>[0], confirm),
       ],
       [
         "search_notebooks",
@@ -439,7 +408,8 @@ class NotebookLMMCPServer {
       ],
       [
         "cleanup_data",
-        (args) => h.handleCleanupData(args as Parameters<typeof h.handleCleanupData>[0]),
+        (args, _sendProgress, confirm) =>
+          h.handleCleanupData(args as Parameters<typeof h.handleCleanupData>[0], confirm),
       ],
       ["add_source", (args) => h.handleAddSource(args as Parameters<typeof h.handleAddSource>[0])],
       [
@@ -484,22 +454,13 @@ class NotebookLMMCPServer {
   /**
    * Setup MCP request handlers
    */
-  private setupHandlers(
-    server: Server,
-    toolDispatch: Map<
-      string,
-      (
-        args: Record<string, unknown> | undefined,
-        sendProgress: ProgressCallback
-      ) => Promise<unknown>
-    >
-  ): void {
+  private setupHandlers(server: Server, toolDispatch: ToolDispatch): void {
     // Register Resource Handlers (Resources, Templates, Completions)
     this.resourceHandlers.registerHandlers(server);
 
     // List available tools. Rebuilt per request so `ask_question`'s
     // library-derived description reflects the CURRENT active notebook.
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler("tools/list", async () => {
       log.info("📋 [MCP] list_tools request received");
       this.toolDefinitions = this.getActiveTools();
       return {
@@ -508,7 +469,7 @@ class NotebookLMMCPServer {
     });
 
     // Handle tool calls
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler("tools/call", async (request, ctx: ServerContext) => {
       const { name, arguments: args } = request.params;
       const progressToken = extractProgressToken(request.params);
 
@@ -546,7 +507,10 @@ class NotebookLMMCPServer {
       const sendProgress = async (message: string, progress?: number, total?: number) => {
         if (!progressToken) return;
         try {
-          await server.notification({
+          // `ctx.mcpReq.notify` correlates the notification with THIS request,
+          // which the 2026-07-28 revision needs (and which a bare
+          // `server.notification` cannot express).
+          await ctx.mcpReq.notify({
             method: "notifications/progress",
             params: {
               progressToken,
@@ -568,8 +532,8 @@ class NotebookLMMCPServer {
           // Unknown method names are a protocol-level error, not a tool
           // result: returning a success-shaped payload made a typo look like
           // a tool that ran and failed.
-          throw new McpError(
-            ErrorCode.MethodNotFound,
+          throw new ProtocolError(
+            METHOD_NOT_FOUND,
             `Unknown tool: ${name}. Call tools/list for the active set.`
           );
         }
@@ -579,8 +543,8 @@ class NotebookLMMCPServer {
         // invokable by name, so the profile setting was cosmetic.
         if (!tool) {
           log.error(`❌ [MCP] Tool disabled by profile: ${name}`);
-          throw new McpError(
-            ErrorCode.MethodNotFound,
+          throw new ProtocolError(
+            METHOD_NOT_FOUND,
             `Tool "${name}" is not available in the active profile ` +
               `("${this.settingsManager.getEffectiveSettings().profile}"). ` +
               `Call tools/list for the active set.`
@@ -597,7 +561,28 @@ class NotebookLMMCPServer {
           return failure(`Invalid arguments for \`${name}\`: ${validationError}`);
         }
 
-        const result = await handler(args, sendProgress);
+        const result = await handler(args, sendProgress, {
+          // A client that never declared `elicitation` cannot answer a
+          // confirmation request, so the handlers keep their old
+          // no-confirmation behaviour instead of failing with a capability
+          // error. On 2026-07-28 this accessor is backfilled per request from
+          // the call's own `_meta` envelope; on a 2025-era connection it is
+          // the initialize-declared value.
+          canElicit: server.getClientCapabilities()?.elicitation !== undefined,
+          // Answers carried by a retried call (multi-round-trip). Empty on
+          // the first call.
+          responses: ctx.mcpReq.inputResponses,
+        });
+
+        // A handler that needs the user to answer something returns the
+        // SDK's input-required result. It is a protocol result in its own
+        // right — pass it straight through rather than JSON-stringifying it
+        // into a text block. The SDK serves it natively on 2026-07-28 and,
+        // via its legacy shim, as a real elicitation request to 2025 clients.
+        if (isInputRequiredResult(result)) {
+          log.info(`  ⏸️  ${name} needs client input — returning input_required`);
+          return result;
+        }
 
         // Never attach structuredContent to an error result — only the
         // success shape is covered by the declared outputSchema.
@@ -622,7 +607,9 @@ class NotebookLMMCPServer {
       } catch (error) {
         // Protocol-level errors (unknown/disabled tool) must reach the client
         // as JSON-RPC errors, not as a tool result.
-        if (error instanceof McpError) throw error;
+        if (error instanceof ProtocolError) {
+          throw error;
+        }
 
         const errorMessage = error instanceof Error ? error.message : String(error);
         log.error(`❌ [MCP] Tool execution error: ${errorMessage}`);
@@ -660,6 +647,10 @@ class NotebookLMMCPServer {
 
       try {
         await this.toolHandlers.cleanup();
+        // `serveStdio`'s handle owns the instance it pinned to the connection
+        // and the transport underneath it; closing the primary Server alone
+        // would leave both open.
+        await this.stdioHandle?.close();
         await this.server.close();
         // An HTTP transport keeps a listening socket that `server.close()`
         // does not own; leaving it open kept the process alive past shutdown.
@@ -720,26 +711,27 @@ class NotebookLMMCPServer {
     log.info("");
 
     if (options.kind === "http") {
+      // The SDK's HTTP entry builds an instance per exchange from this factory.
       this.httpHandle = await startHttpTransport({
         port: options.port,
         host: options.host,
-        // One fresh Server per HTTP session: the SDK binds a Server to exactly
-        // one transport, so sharing this.server made every session after the
-        // first fail with "already connected" (returned to the client as 500).
-        connect: async (transport) => {
-          const { server } = this.createConnection();
-          await server.connect(transport);
-        },
+        factory: () => this.createConnection().server,
       });
-      log.success("✅ MCP Server connected via Streamable HTTP");
+      log.success("✅ MCP Server connected via Streamable HTTP (2026-07-28 + legacy)");
     } else {
-      const transport = new StdioServerTransport();
-      await this.server.connect(transport);
+      // `serveStdio` — NOT `new StdioServerTransport()` + `connect()` — is what
+      // selects the protocol era. The v1-style wiring speaks the 2025 era only;
+      // this entry answers `server/discover` and serves the stateless
+      // 2026-07-28 revision, while `legacy` (default 'serve') keeps answering
+      // the older `initialize` handshake for clients that have not moved.
+      this.stdioHandle = serveStdio(() => this.createConnection().server, {
+        onerror: (error) => log.warning(`⚠️  [stdio] ${error.message}`),
+      });
       // A stdio client that disconnects closes the pipe without a signal;
       // without this the server and its Chrome outlive the client (issue #29).
       process.stdin.on("close", () => this.stdinShutdownHook?.());
       process.stdin.on("end", () => this.stdinShutdownHook?.());
-      log.success("✅ MCP Server connected via stdio");
+      log.success("✅ MCP Server serving stdio (2026-07-28 + legacy)");
     }
 
     log.success("🎉 Ready to receive requests from Claude Code!");

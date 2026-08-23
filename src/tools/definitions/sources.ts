@@ -6,7 +6,7 @@
  * descriptions stay focused on one operation each.
  */
 
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 
 const sharedNotebookTargeting = {
   session_id: {

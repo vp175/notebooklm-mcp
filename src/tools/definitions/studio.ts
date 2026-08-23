@@ -14,7 +14,7 @@
  * schemas advertising the wrong thing.
  */
 
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import {
   ALL_STUDIO_TYPES,
   FILE_KIND_TYPES,

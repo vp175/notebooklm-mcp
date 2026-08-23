@@ -18,10 +18,17 @@ import { discoverNotebooks, type DiscoveredNotebook } from "../notebooklm/discov
 import type { AudioGenerationResult, DownloadAudioResult } from "../notebooklm/audio.js";
 import type { StudioOutputType } from "../notebooklm/studio-outputs.js";
 import { isStudioTypeImplemented, implementedStudioTypes } from "../notebooklm/studio-outputs.js";
+import {
+  acceptedContent,
+  inputRequired,
+  inputResponse,
+  type InputRequiredResult,
+} from "@modelcontextprotocol/server";
 import { CONFIG, applyBrowserOptions, type BrowserOptions } from "../config.js";
+import type { ConfirmContext } from "../index.js";
 import { log } from "../utils/logger.js";
 import type { AskQuestionResult, ToolResult, ProgressCallback } from "../types.js";
-import { RateLimitError, ElicitationRequestError } from "../errors.js";
+import { RateLimitError } from "../errors.js";
 import { CleanupManager } from "../utils/cleanup-manager.js";
 import { applyAiMarker, PROVENANCE } from "../utils/disclaimer.js";
 
@@ -85,24 +92,11 @@ function endConfigOverride(token: ConfigOverrideToken): void {
 }
 
 /**
- * Result of an elicitation request, or `undefined` when the client never
- * declared the `elicitation` capability — callers must treat `undefined` the
- * same as `this.elicit` not existing at all, i.e. fall through to
- * pre-elicitation behavior rather than treating it as a decline.
- *
- * This is distinct from a *failed* request: if the capability WAS declared
- * but the underlying `elicitInput` call itself rejected or timed out, the
- * callback throws `ElicitationRequestError` instead of resolving to
- * `undefined`. A caller that must fail closed when confirmation could not be
- * obtained (e.g. `remove_notebook`, a destructive tool) needs to catch that
- * specific error and refuse to proceed — letting it collapse to `undefined`
- * would silently proceed unconfirmed.
+ * Identifier for the confirmation round-trip. The server assigns it when it
+ * returns `input_required`; the client echoes it back under the same key in
+ * `inputResponses`, which is how the retried call is matched to the question.
  */
-type ElicitResult = { action: "accept" | "decline" | "cancel"; content?: Record<string, unknown> };
-type ElicitCallback = (
-  message: string,
-  schema: Record<string, unknown>
-) => Promise<ElicitResult | undefined>;
+const CONFIRM_KEY = "confirm";
 
 /**
  * MCP Tool Handlers
@@ -115,8 +109,7 @@ export class ToolHandlers {
   constructor(
     sessionManager: SessionManager,
     authManager: AuthManager,
-    library: NotebookLibrary,
-    private readonly elicit?: ElicitCallback
+    library: NotebookLibrary
   ) {
     this.sessionManager = sessionManager;
     this.authManager = authManager;
@@ -895,9 +888,12 @@ export class ToolHandlers {
   /**
    * Handle remove_notebook tool
    */
-  async handleRemoveNotebook(args: {
-    id: string;
-  }): Promise<ToolResult<{ removed: boolean; closed_sessions: number }>> {
+  async handleRemoveNotebook(
+    args: {
+      id: string;
+    },
+    confirm?: ConfirmContext
+  ): Promise<ToolResult<{ removed: boolean; closed_sessions: number }> | InputRequiredResult> {
     log.info(`🔧 [TOOL] remove_notebook called`);
     log.info(`  ID: ${args.id}`);
 
@@ -911,44 +907,43 @@ export class ToolHandlers {
         };
       }
 
-      if (this.elicit) {
-        let confirmation: ElicitResult | undefined;
-        try {
-          confirmation = await this.elicit(
-            `Remove notebook "${notebook.name}" (${notebook.id}) from your local library? This does not delete the notebook on NotebookLM itself — only the local library entry.`,
-            {
-              type: "object",
-              properties: { confirmed: { type: "boolean" } },
-              required: ["confirmed"],
-            }
-          );
-        } catch (error) {
-          if (error instanceof ElicitationRequestError) {
-            // Capability WAS declared, but the confirmation request itself
-            // failed or timed out (the human never got to answer). Fail
-            // closed — do NOT fall through to an unconfirmed removal. This is
-            // distinct from the capability-not-declared case below, which
-            // resolves to `undefined` rather than throwing and legitimately
-            // proceeds unconfirmed.
-            log.warning(
-              `  ⚠️  [TOOL] remove_notebook: confirmation request failed/timed out — not removing`
-            );
-            return {
-              success: false,
-              error: `Could not confirm removal: the confirmation request failed or timed out before receiving a response. Notebook "${notebook.name}" (${notebook.id}) was NOT removed.`,
-            };
+      // Confirmation is a multi-round-trip request: we return `input_required`
+      // and the client re-calls this tool with the answer attached. The SDK
+      // serves that natively on protocol revision 2026-07-28 and, through its
+      // legacy shim, as a real `elicitation/create` request to 2025-era
+      // clients — so this one path covers both.
+      if (confirm?.canElicit) {
+        const answer = acceptedContent<{ confirmed?: boolean }>(confirm.responses, CONFIRM_KEY);
+        if (answer === undefined) {
+          const view = inputResponse(confirm.responses, CONFIRM_KEY);
+          if (view.kind === "missing") {
+            // First round: ask.
+            return inputRequired({
+              inputRequests: {
+                [CONFIRM_KEY]: inputRequired.elicit({
+                  message:
+                    `Remove notebook "${notebook.name}" (${notebook.id}) from your local ` +
+                    `library? This does not delete the notebook on NotebookLM itself — ` +
+                    `only the local library entry.`,
+                  requestedSchema: {
+                    type: "object",
+                    properties: { confirmed: { type: "boolean" } },
+                    required: ["confirmed"],
+                  },
+                }),
+              },
+            });
           }
-          throw error;
+          // Declined, cancelled, or an unreadable response. Fail CLOSED: a
+          // destructive tool must never treat "no usable answer" as consent.
+          log.info(`  ℹ️  remove_notebook not confirmed (${view.kind})`);
+          return {
+            success: false,
+            error: `Removal not confirmed — notebook "${notebook.name}" (${notebook.id}) was NOT removed.`,
+          };
         }
-        // `confirmation` is `undefined` when elicitation isn't usable for this
-        // client because the capability was never declared — that is NOT a
-        // decline, it means fall through unchanged, exactly as if
-        // this.elicit didn't exist.
-        if (
-          confirmation &&
-          (confirmation.action !== "accept" || confirmation.content?.confirmed !== true)
-        ) {
-          log.info(`  ℹ️  remove_notebook declined via elicitation`);
+        if (answer.confirmed !== true) {
+          log.info(`  ℹ️  remove_notebook declined by user`);
           return { success: false, error: "Removal declined by user." };
         }
       }
@@ -1032,7 +1027,10 @@ export class ToolHandlers {
    *
    * ULTRATHINK Deep Cleanup - scans entire system for ALL NotebookLM MCP files
    */
-  async handleCleanupData(args: { confirm: boolean; preserve_library?: boolean }): Promise<
+  async handleCleanupData(
+    args: { confirm: boolean; preserve_library?: boolean },
+    confirmCtx?: ConfirmContext
+  ): Promise<
     ToolResult<{
       status: string;
       mode: string;
@@ -1054,6 +1052,7 @@ export class ToolHandlers {
         categorySummary: Record<string, { count: number; bytes: number }>;
       };
     }>
+    | InputRequiredResult
   > {
     const { confirm, preserve_library = false } = args;
 
@@ -1096,61 +1095,51 @@ export class ToolHandlers {
         );
         log.info(`  Platform: ${platformInfo.platform}`);
 
-        if (this.elicit) {
-          let confirmation: ElicitResult | undefined;
-          try {
-            confirmation = await this.elicit(
-              // Name the categories that will actually be deleted rather than
-              // a vague summary — the previous wording ("auth state, browser
-              // profile, and optionally the notebook library") understated it,
-              // and a user cannot consent to what they are not told.
-              `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)}?\n` +
-                // Optional categories appear in the preview but are NOT
-                // deleted, so label them rather than implying consent to them.
-                `Categories: ${
-                  preview.categories
-                    .map((c) => (c.optional ? `${c.name} (listed only, not deleted)` : c.name))
-                    .join(", ") || "(none)"
-                }.\n` +
-                `You will have to sign in to NotebookLM again.` +
-                (preserve_library
-                  ? " The notebook library will be KEPT."
-                  : " The notebook library WILL be deleted.") +
-                `\nThis cannot be undone.`,
-              {
-                type: "object",
-                properties: { confirmed: { type: "boolean" } },
-                required: ["confirmed"],
-              }
-            );
-          } catch (error) {
-            // Capability WAS declared, but the confirmation request itself
-            // failed or timed out (typically `ElicitationRequestError`, but
-            // any thrown error from this call is handled the same way).
-            // Unlike remove_notebook, there is nothing unsafe about falling
-            // through here: this is the preview branch, no deletion has
-            // happened or is about to happen, and `preview` was already
-            // computed above. Treat this exactly like the
-            // capability-not-declared case (`confirmation` stays
-            // `undefined`) and return the normal preview payload rather
-            // than discarding it behind an opaque error.
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            log.warning(
-              `  ⚠️  [TOOL] cleanup_data: confirmation request failed/timed out (${errorMessage}) — returning preview only`
-            );
-            confirmation = undefined;
+        if (confirmCtx?.canElicit) {
+          const answer = acceptedContent<{ confirmed?: boolean }>(
+            confirmCtx.responses,
+            CONFIRM_KEY
+          );
+          const view = inputResponse(confirmCtx.responses, CONFIRM_KEY);
+
+          if (answer === undefined && view.kind === "missing") {
+            // First round: ask. The client re-calls this tool with the answer.
+            return inputRequired({
+              inputRequests: {
+                [CONFIRM_KEY]: inputRequired.elicit({
+                  // Name the categories that will actually be deleted rather
+                  // than a vague summary — the previous wording ("auth state,
+                  // browser profile, and optionally the notebook library")
+                  // understated it, and a user cannot consent to what they are
+                  // not told.
+                  message:
+                    `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)}?\n` +
+                    // Optional categories appear in the preview but are NOT
+                    // deleted, so label them rather than implying consent.
+                    `Categories: ${
+                      preview.categories
+                        .map((c) => (c.optional ? `${c.name} (listed only, not deleted)` : c.name))
+                        .join(", ") || "(none)"
+                    }.\n` +
+                    `You will have to sign in to NotebookLM again.` +
+                    (preserve_library
+                      ? " The notebook library will be KEPT."
+                      : " The notebook library WILL be deleted.") +
+                    `\nThis cannot be undone.`,
+                  requestedSchema: {
+                    type: "object",
+                    properties: { confirmed: { type: "boolean" } },
+                    required: ["confirmed"],
+                  },
+                }),
+              },
+            });
           }
-          // `confirmation` is `undefined` when elicitation isn't usable for
-          // this client — fall through to the preview-only return below,
-          // exactly as if this.elicit didn't exist.
-          if (
-            confirmation &&
-            confirmation.action === "accept" &&
-            confirmation.content?.confirmed === true
-          ) {
+
+          if (answer?.confirmed === true) {
             const result = await cleanupManager.performCleanup(mode, preserve_library);
             log.success(
-              `✅ [TOOL] cleanup_data completed via elicitation - deleted ${result.deletedPaths.length} items`
+              `✅ [TOOL] cleanup_data completed after confirmation - deleted ${result.deletedPaths.length} items`
             );
             return {
               success: result.success,
@@ -1166,9 +1155,13 @@ export class ToolHandlers {
               },
             };
           }
-          if (confirmation) {
-            log.info(`  ℹ️  cleanup_data declined via elicitation — returning preview only`);
-          }
+
+          // Declined, cancelled, or an unreadable answer. Unlike
+          // remove_notebook there is nothing unsafe about continuing here:
+          // this is the preview branch, nothing has been deleted, and the
+          // preview is already computed — so return it rather than an opaque
+          // error.
+          log.info(`  ℹ️  cleanup_data not confirmed (${view.kind}) — returning preview only`);
         }
 
         return {

@@ -1,4 +1,4 @@
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import type { NotebookLibrary } from "../../library/notebook-library.js";
 import { getTopicsLine, getUseCaseBullets } from "../../library/metadata.js";
 

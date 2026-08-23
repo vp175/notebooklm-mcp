@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readFileSync } from "fs";
 import path from "path";
 import { CONFIG } from "../config.js";
 import { log } from "./logger.js";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 
 export type ProfileName = "minimal" | "standard" | "full";
 

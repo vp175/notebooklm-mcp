@@ -4,7 +4,7 @@
  * Aggregates tool definitions from sub-modules.
  */
 
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool } from "@modelcontextprotocol/server";
 import type { NotebookLibrary } from "../library/notebook-library.js";
 import { askQuestionTool, buildAskQuestionDescription } from "./definitions/ask-question.js";
 import { notebookManagementTools } from "./definitions/notebook-management.js";
