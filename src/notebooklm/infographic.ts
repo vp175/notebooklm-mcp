@@ -27,6 +27,7 @@ import {
   triggerViaDialog,
   downloadViaSingleMenuItem,
 } from "./studio-outputs.js";
+import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 import type { DownloadAudioResult } from "./audio.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.infographicButton;
@@ -34,8 +35,15 @@ const READY_SELECTORS = Selectors.studio.infographicTile;
 const MORE_MENU_SELECTORS = Selectors.studio.infographicMoreMenuButton;
 const DOWNLOAD_MENU_ITEM_SELECTORS = Selectors.studio.singleDownloadMenuItem;
 
-async function triggerInfographic(page: Page): Promise<void> {
-  await triggerViaDialog(page, TRIGGER_SELECTORS, "Infographic entry");
+// `opts` must be declared and forwarded — see video-overview.ts's trigger
+// for why (a `page`-only trigger silently drops the caller's custom_prompt).
+async function triggerInfographic(
+  page: Page,
+  opts: StudioTriggerOptions
+): Promise<StudioTriggerOutcome> {
+  return triggerViaDialog(page, TRIGGER_SELECTORS, "Infographic entry", {
+    customPrompt: opts.customPrompt,
+  });
 }
 
 async function downloadInfographic(page: Page, destDir: string): Promise<DownloadAudioResult> {
@@ -48,8 +56,9 @@ async function downloadInfographic(page: Page, destDir: string): Promise<Downloa
   );
 }
 
+// Kind ("file") comes from FILE_KIND_TYPES via `studioKindOf` in the
+// engine, not from this object — see studio-outputs.ts.
 registerStudioStrategy("infographic", {
-  kind: "file",
   triggerSelectors: TRIGGER_SELECTORS,
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,

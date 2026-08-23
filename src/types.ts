@@ -57,6 +57,18 @@ export interface AskQuestionResult {
    * requested (or the default `none`) so downstream tools can adapt.
    */
   source_format?: "none" | "inline" | "footnotes" | "json";
+  /**
+   * Set when a non-`none` `source_format` was requested but no citations could
+   * be read from the answer. Previously that case was indistinguishable from
+   * "citations not requested": the `sources` key was simply absent.
+   */
+  sources_note?: string;
+  /**
+   * Set when the caller supplied a `session_id` that this server does not know
+   * (stale id, expired session, or a different server process). A brand-new
+   * session answered the question and carries none of the earlier context.
+   */
+  session_note?: string;
 }
 
 /**
@@ -66,20 +78,6 @@ export interface ToolResult<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
-}
-
-/**
- * MCP Tool definition
- */
-export interface Tool {
-  name: string;
-  title?: string;
-  description: string;
-  inputSchema: {
-    type: "object";
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
 }
 
 /**

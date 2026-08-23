@@ -30,12 +30,19 @@ import {
   openStructuredViewer,
   getSandboxFrame,
 } from "./studio-outputs.js";
+import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.quizButton;
 const READY_SELECTORS = Selectors.studio.quizTile;
 
-async function triggerQuiz(page: Page): Promise<void> {
-  await triggerViaDialog(page, TRIGGER_SELECTORS, "Quiz entry");
+// `opts` must be declared and forwarded: the engine calls
+// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
+// `page` silently discards it — generation then runs over the whole
+// notebook while the tool reports success.
+async function triggerQuiz(page: Page, opts: StudioTriggerOptions): Promise<StudioTriggerOutcome> {
+  return triggerViaDialog(page, TRIGGER_SELECTORS, "Quiz entry", {
+    customPrompt: opts.customPrompt,
+  });
 }
 
 export interface QuizQuestion {
@@ -132,11 +139,14 @@ async function extractQuiz(page: Page): Promise<QuizResult> {
   return missingPositions.length > 0 ? { questions, missingPositions } : { questions };
 }
 
+// Kind ("structured") comes from STRUCTURED_KIND_TYPES via `studioKindOf`
+// in the engine, not from this object — see studio-outputs.ts.
 registerStudioStrategy("quiz", {
-  kind: "structured",
   triggerSelectors: TRIGGER_SELECTORS,
   // No in-progress DOM/text was observed live this session (mirrors the
-  // same empty-array convention used by video-overview.ts/slides.ts).
+  // same empty-array convention used by video-overview.ts/slides.ts). An
+  // empty list means the engine has no DOM signal for this type at all —
+  // repeat-call protection comes from its in-flight record instead.
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,
   trigger: triggerQuiz,

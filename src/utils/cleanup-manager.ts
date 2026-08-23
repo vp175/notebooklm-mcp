@@ -5,14 +5,23 @@
  *
  * Handles safe removal of:
  * - Legacy data from notebooklm-mcp-nodejs
- * - Current installation data
+ * - Current installation data (account-aware, taken from CONFIG)
  * - Browser profiles and session data
  * - NPM/NPX cache
- * - Claude CLI MCP logs
- * - Claude Projects cache
+ * - Claude CLI MCP logs (only this server's own `mcp-logs-*notebooklm*` dirs)
  * - Temporary backups
- * - Editor logs (Cursor, VSCode)
- * - Trash files (optional)
+ * - Editor logs (Cursor, VSCode) - optional, opt-in only
+ *
+ * Explicitly NOT handled, because none of it is this server's data:
+ * - Claude Code project directories (`~/.claude/projects/*`) hold the user's
+ *   irreplaceable session transcripts, and their names are derived from the
+ *   project path — a checkout of this repo produces a directory that matched
+ *   the old `*notebooklm-mcp*` glob.
+ * - The Recycle Bin / Trash, where deletion is unrecoverable.
+ *
+ * Every candidate path is checked against an allow-list of roots (see
+ * `getAllowedRoots`) both when it is enumerated and again immediately before
+ * `fs.rm`, so a sloppy glob can no longer destroy unrelated user data.
  *
  * Platform support: Linux, Windows, macOS
  */
@@ -23,6 +32,7 @@ import { globby } from "globby";
 import envPaths from "env-paths";
 import os from "os";
 import { log } from "./logger.js";
+import { CONFIG } from "../config.js";
 
 export type CleanupMode = "legacy" | "all" | "deep";
 
@@ -50,6 +60,28 @@ interface Paths {
   log: string;
   temp: string;
 }
+
+/**
+ * One entry of the deletion allow-list. A candidate path must live inside
+ * `base` (or be `base` itself) and satisfy whichever extra name constraints
+ * are present, otherwise it is refused.
+ */
+interface AllowedRoot {
+  /** Directory the candidate must be equal to, or live below. */
+  base: string;
+  /** When set, the candidate's own name must match this. */
+  basename?: RegExp;
+  /** When set, the first path segment below `base` must match this. */
+  firstSegment?: RegExp;
+}
+
+/**
+ * The only directory names under the Claude CLI cache that belong to this
+ * server. Claude CLI writes `<cache>/<project-slug>/mcp-logs-<server-name>`,
+ * so anything that is not an `mcp-logs-*notebooklm*` directory is somebody
+ * else's data.
+ */
+const MCP_LOG_DIR_PATTERN = /^mcp-logs-.*notebooklm/i;
 
 export class CleanupManager {
   private legacyPaths: Paths;
@@ -83,6 +115,11 @@ export class CleanupManager {
 
   /**
    * Get Claude CLI cache directory (platform-specific)
+   *
+   * Verified on Windows: the CLI cache lives under LOCALAPPDATA
+   * (`%LOCALAPPDATA%\claude-cli-nodejs`), not APPDATA — the sibling
+   * `getClaudeProjectsPath()` helper got this wrong and has been removed
+   * along with the category that used it.
    */
   private getClaudeCliCachePath(): string {
     const platform = process.platform;
@@ -95,23 +132,6 @@ export class CleanupManager {
     } else {
       // Linux and others
       return path.join(this.homeDir, ".cache", "claude-cli-nodejs");
-    }
-  }
-
-  /**
-   * Get Claude projects directory (platform-specific)
-   */
-  private getClaudeProjectsPath(): string {
-    const platform = process.platform;
-
-    if (platform === "win32") {
-      const appData = process.env.APPDATA || path.join(this.homeDir, "AppData", "Roaming");
-      return path.join(appData, ".claude", "projects");
-    } else if (platform === "darwin") {
-      return path.join(this.homeDir, "Library", "Application Support", "claude", "projects");
-    } else {
-      // Linux and others
-      return path.join(this.homeDir, ".claude", "projects");
     }
   }
 
@@ -139,22 +159,6 @@ export class CleanupManager {
     }
 
     return paths;
-  }
-
-  /**
-   * Get trash directory (platform-specific)
-   */
-  private getTrashPath(): string | null {
-    const platform = process.platform;
-
-    if (platform === "darwin") {
-      return path.join(this.homeDir, ".Trash");
-    } else if (platform === "linux") {
-      return path.join(this.homeDir, ".local", "share", "Trash");
-    } else {
-      // Windows Recycle Bin is complex, skip for now
-      return null;
-    }
   }
 
   /**
@@ -205,6 +209,134 @@ export class CleanupManager {
   }
 
   // ============================================================================
+  // Safety Guard Rails
+  // ============================================================================
+
+  /**
+   * The complete set of roots this manager is ever allowed to delete inside.
+   *
+   * WHY: every candidate previously went straight from a glob into
+   * `fs.rm(..., { recursive: true, force: true })`, so one loose pattern was
+   * enough to destroy unrelated user data. Nothing outside this list is
+   * deletable, regardless of what a finder returns.
+   *
+   * CONFIG — not a locally recomputed envPaths default — is the source of
+   * truth for this server's own directories, because `applyAccountToConfig()`
+   * re-roots them under `<dataDir>/accounts/<slug>` when `--account` /
+   * `NOTEBOOKLM_ACCOUNT` is active. CONFIG is read here at call time and never
+   * captured at module load, since that re-rooting happens during startup.
+   */
+  private getAllowedRoots(): AllowedRoot[] {
+    return [
+      // This server's own data/config (account-aware).
+      { base: CONFIG.dataDir },
+      { base: CONFIG.configDir },
+      // envPaths locations CONFIG does not model. `currentPaths.data` is
+      // deliberately absent: in default mode CONFIG.dataDir already is that
+      // directory, and in account mode it is the shared parent that must stay.
+      { base: this.currentPaths.cache },
+      { base: this.currentPaths.log },
+      { base: this.currentPaths.temp },
+      // Legacy (-nodejs suffixed) installation.
+      { base: this.legacyPaths.data },
+      { base: this.legacyPaths.config },
+      { base: this.legacyPaths.cache },
+      { base: this.legacyPaths.log },
+      { base: this.legacyPaths.temp },
+      // Hand-written legacy locations from before envPaths was adopted.
+      ...this.getManualLegacyPaths().map((base) => ({ base })),
+      // NPX cache: only a `notebooklm-mcp` package directory, never a sibling.
+      { base: path.join(this.getNpmCachePath(), "_npx"), basename: /^notebooklm-mcp$/i },
+      // Claude CLI cache: only this server's own log directories.
+      { base: this.getClaudeCliCachePath(), basename: MCP_LOG_DIR_PATTERN },
+      // Editor logs: only individual *notebooklm*.log files.
+      ...this.getEditorConfigPaths().map((base) => ({
+        base,
+        basename: /notebooklm.*\.log$/i,
+      })),
+      // System temp: only our own `notebooklm-*` backup trees, never the
+      // temp directory itself or anyone else's scratch files.
+      { base: this.tempDir, firstSegment: /^notebooklm-/i },
+    ];
+  }
+
+  /**
+   * True when `child` resolves to a location strictly below `parent`.
+   * Uses the relative-path form rather than `startsWith`, which would treat
+   * `/data-old` as living inside `/data`.
+   */
+  private isStrictlyInside(child: string, parent: string): boolean {
+    const rel = path.relative(path.resolve(parent), path.resolve(child));
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+  }
+
+  /**
+   * Decide whether a path may be deleted. Called both while enumerating
+   * candidates and again immediately before the irreversible `fs.rm`.
+   */
+  private isPathAllowed(target: string): { allowed: boolean; reason?: string } {
+    const resolved = path.resolve(target);
+
+    // Absolute stops, checked before the allow-list so no entry can widen them.
+    if (resolved === path.parse(resolved).root) {
+      return { allowed: false, reason: "path resolves to a filesystem root" };
+    }
+    if (resolved === path.resolve(this.homeDir)) {
+      return { allowed: false, reason: "path resolves to the user's home directory" };
+    }
+    if (resolved === path.resolve(this.tempDir)) {
+      return { allowed: false, reason: "path resolves to the system temp directory" };
+    }
+    // A parent of the live data directory is never deletable: under an account
+    // profile that would take every other account's data with it, and in the
+    // default layout it would remove the app root out from under CONFIG.
+    if (this.isStrictlyInside(CONFIG.dataDir, resolved)) {
+      return {
+        allowed: false,
+        reason: `path is a parent of CONFIG.dataDir (${CONFIG.dataDir})`,
+      };
+    }
+
+    for (const root of this.getAllowedRoots()) {
+      const base = path.resolve(root.base);
+      const rel = path.relative(base, resolved);
+      const inside = rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+      if (!inside) continue;
+
+      if (root.basename && !root.basename.test(path.basename(resolved))) continue;
+
+      if (root.firstSegment) {
+        const segments = rel.split(path.sep).filter(Boolean);
+        if (segments.length === 0 || !root.firstSegment.test(segments[0])) continue;
+      }
+
+      return { allowed: true };
+    }
+
+    return { allowed: false, reason: "path is outside every allowed cleanup root" };
+  }
+
+  /**
+   * Allow-list filter used while building the categories.
+   *
+   * WHY filter at enumeration and not only at delete time: on Windows
+   * `getManualLegacyPaths()` lists `%LOCALAPPDATA%\notebooklm-mcp`, which is
+   * the parent of CONFIG.dataDir and therefore permanently refused. Listing it
+   * anyway would promise a deletion in the preview and then report every deep
+   * cleanup as "partial" forever. Its Data/Cache/Log children are still removed
+   * by the current-installation category.
+   */
+  private isSafeCandidate(candidate: string, category: string): boolean {
+    const verdict = this.isPathAllowed(candidate);
+    if (!verdict.allowed) {
+      log.warning(
+        `⚠️  Skipping ${category} path outside the cleanup allow-list: ${candidate} (${verdict.reason})`
+      );
+    }
+    return verdict.allowed;
+  }
+
+  // ============================================================================
   // Search Methods for Different File Types
   // ============================================================================
 
@@ -246,42 +378,35 @@ export class CleanupManager {
         return found;
       }
 
-      // Search for notebooklm MCP logs
+      // Search for notebooklm MCP logs, one level below the cache root only.
+      //
+      // WHY the old top-level `*notebooklm-mcp*` pattern is gone: Claude CLI
+      // names its per-project cache directories after the project path, so a
+      // checkout of this repo produces `<cache>/C--...-notebooklm-mcp-fork`
+      // as a direct child of the cache root. That matched the glob, and the
+      // recursive delete would have taken every MCP server's logs for that
+      // project — none of which is this server's data. Only an
+      // `mcp-logs-*notebooklm*` directory genuinely belongs to us.
       const patterns = [
-        path.join(claudeCliPath, "*/mcp-logs-notebooklm"),
-        path.join(claudeCliPath, "*notebooklm-mcp*"),
+        path.join(claudeCliPath, "*/mcp-logs-notebooklm*"),
+        path.join(claudeCliPath, "*/mcp-logs-*notebooklm-mcp*"),
       ];
 
       for (const pattern of patterns) {
         const matches = await globby(pattern, { onlyDirectories: true, absolute: true });
-        found.push(...matches);
+        for (const match of matches) {
+          // Defence in depth: the pattern alone must not be trusted.
+          if (!MCP_LOG_DIR_PATTERN.test(path.basename(match))) {
+            log.warning(`⚠️  Ignoring unexpected Claude CLI cache match: ${match}`);
+            continue;
+          }
+          if (!found.includes(match)) {
+            found.push(match);
+          }
+        }
       }
     } catch (error) {
       log.warning(`⚠️  Error searching Claude CLI cache: ${error}`);
-    }
-
-    return found;
-  }
-
-  /**
-   * Find Claude projects cache
-   */
-  private async findClaudeProjects(): Promise<string[]> {
-    const found: string[] = [];
-
-    try {
-      const projectsPath = this.getClaudeProjectsPath();
-
-      if (!(await this.pathExists(projectsPath))) {
-        return found;
-      }
-
-      // Search for notebooklm-mcp projects
-      const pattern = path.join(projectsPath, "*notebooklm-mcp*");
-      const matches = await globby(pattern, { onlyDirectories: true, absolute: true });
-      found.push(...matches);
-    } catch (error) {
-      log.warning(`⚠️  Error searching Claude projects: ${error}`);
     }
 
     return found;
@@ -331,32 +456,6 @@ export class CleanupManager {
     return found;
   }
 
-  /**
-   * Find trash files
-   */
-  private async findTrashFiles(): Promise<string[]> {
-    const found: string[] = [];
-
-    try {
-      const trashPath = this.getTrashPath();
-      if (!trashPath || !(await this.pathExists(trashPath))) {
-        return found;
-      }
-
-      // Search for notebooklm files in trash
-      const patterns = [path.join(trashPath, "**/*notebooklm*")];
-
-      for (const pattern of patterns) {
-        const matches = await globby(pattern, { absolute: true });
-        found.push(...matches);
-      }
-    } catch (error) {
-      log.warning(`⚠️  Error searching trash: ${error}`);
-    }
-
-    return found;
-  }
-
   // ============================================================================
   // Main Cleanup Methods
   // ============================================================================
@@ -391,7 +490,7 @@ export class CleanupManager {
       ];
 
       for (const dir of legacyDirs) {
-        if (await this.pathExists(dir)) {
+        if ((await this.pathExists(dir)) && this.isSafeCandidate(dir, "legacy")) {
           const size = await this.getDirectorySize(dir);
           legacyPaths.push(dir);
           legacyBytes += size;
@@ -403,7 +502,11 @@ export class CleanupManager {
       // and any paths that envPaths might miss
       const manualLegacyPaths = this.getManualLegacyPaths();
       for (const dir of manualLegacyPaths) {
-        if ((await this.pathExists(dir)) && !allPaths.has(dir)) {
+        if (
+          (await this.pathExists(dir)) &&
+          !allPaths.has(dir) &&
+          this.isSafeCandidate(dir, "legacy")
+        ) {
           const size = await this.getDirectorySize(dir);
           legacyPaths.push(dir);
           legacyBytes += size;
@@ -428,35 +531,49 @@ export class CleanupManager {
       const currentPaths: string[] = [];
       let currentBytes = 0;
 
+      // WHY these come from CONFIG rather than recomputed envPaths defaults:
+      // `applyAccountToConfig()` re-roots dataDir and the browser/profile dirs
+      // under `<dataDir>/accounts/<slug>` whenever `--account` /
+      // `NOTEBOOKLM_ACCOUNT` is used. Reading the defaults here made
+      // cleanup_data report success while deleting none of that account's data
+      // — and, with preserve_library, delete the account's library.json along
+      // with the shared root. cache/log/temp are not modelled by CONFIG, so
+      // they still come from envPaths. In a default (no-account) run every
+      // entry below resolves to exactly the same path as before.
+      //
       // If preserveLibrary is true, don't delete the data directory itself
       // Instead, only delete subdirectories
       const currentDirs = preserveLibrary
         ? [
-            // Don't include data directory to preserve library.json
-            this.currentPaths.config,
+            // Don't include data directory - library.json lives directly in it
+            CONFIG.configDir,
             this.currentPaths.cache,
             this.currentPaths.log,
             this.currentPaths.temp,
             // Only delete subdirectories, not the parent
-            path.join(this.currentPaths.data, "browser_state"),
-            path.join(this.currentPaths.data, "chrome_profile"),
-            path.join(this.currentPaths.data, "chrome_profile_instances"),
+            CONFIG.browserStateDir,
+            CONFIG.chromeProfileDir,
+            CONFIG.chromeInstancesDir,
           ]
         : [
             // Delete everything including data directory
-            this.currentPaths.data,
-            this.currentPaths.config,
+            CONFIG.dataDir,
+            CONFIG.configDir,
             this.currentPaths.cache,
             this.currentPaths.log,
             this.currentPaths.temp,
             // Specific subdirectories (only if parent doesn't exist)
-            path.join(this.currentPaths.data, "browser_state"),
-            path.join(this.currentPaths.data, "chrome_profile"),
-            path.join(this.currentPaths.data, "chrome_profile_instances"),
+            CONFIG.browserStateDir,
+            CONFIG.chromeProfileDir,
+            CONFIG.chromeInstancesDir,
           ];
 
       for (const dir of currentDirs) {
-        if ((await this.pathExists(dir)) && !allPaths.has(dir)) {
+        if (
+          (await this.pathExists(dir)) &&
+          !allPaths.has(dir) &&
+          this.isSafeCandidate(dir, "current installation")
+        ) {
           const size = await this.getDirectorySize(dir);
           currentPaths.push(dir);
           currentBytes += size;
@@ -482,7 +599,9 @@ export class CleanupManager {
 
     // Category 3: NPM Cache
     if (mode === "all" || mode === "deep") {
-      const npmPaths = await this.findNpmCache();
+      const npmPaths = (await this.findNpmCache()).filter((p) =>
+        this.isSafeCandidate(p, "NPM/NPX cache")
+      );
       if (npmPaths.length > 0) {
         let npmBytes = 0;
         for (const p of npmPaths) {
@@ -507,7 +626,9 @@ export class CleanupManager {
 
     // Category 4: Claude CLI Logs
     if (mode === "all" || mode === "deep") {
-      const claudeCliPaths = await this.findClaudeCliLogs();
+      const claudeCliPaths = (await this.findClaudeCliLogs()).filter((p) =>
+        this.isSafeCandidate(p, "Claude CLI MCP logs")
+      );
       if (claudeCliPaths.length > 0) {
         let claudeCliBytes = 0;
         for (const p of claudeCliPaths) {
@@ -532,7 +653,9 @@ export class CleanupManager {
 
     // Category 5: Temporary Backups
     if (mode === "all" || mode === "deep") {
-      const backupPaths = await this.findTemporaryBackups();
+      const backupPaths = (await this.findTemporaryBackups()).filter((p) =>
+        this.isSafeCandidate(p, "temporary backup")
+      );
       if (backupPaths.length > 0) {
         let backupBytes = 0;
         for (const p of backupPaths) {
@@ -555,34 +678,18 @@ export class CleanupManager {
       }
     }
 
-    // Category 6: Claude Projects (deep mode only)
+    // Category 6: Editor Logs (deep mode only)
+    //
+    // NOTE: the former "Claude Projects Cache" category lived here and has been
+    // removed. It globbed `<claudeProjects>/*notebooklm-mcp*` and recursively
+    // deleted the matches, but Claude Code names those directories after the
+    // project path — so a checkout of this repo yields
+    // `C--...-notebooklm-mcp-fork`, and cleanup_data would have destroyed the
+    // user's irreplaceable session transcripts for this very repository.
     if (mode === "deep") {
-      const projectPaths = await this.findClaudeProjects();
-      if (projectPaths.length > 0) {
-        let projectBytes = 0;
-        for (const p of projectPaths) {
-          if (!allPaths.has(p)) {
-            projectBytes += await this.getDirectorySize(p);
-            allPaths.add(p);
-          }
-        }
-
-        if (projectBytes > 0) {
-          categories.push({
-            name: "Claude Projects Cache",
-            description: "Project-specific cache in Claude config",
-            paths: projectPaths,
-            totalBytes: projectBytes,
-            optional: true,
-          });
-          totalSizeBytes += projectBytes;
-        }
-      }
-    }
-
-    // Category 7: Editor Logs (deep mode only)
-    if (mode === "deep") {
-      const editorPaths = await this.findEditorLogs();
+      const editorPaths = (await this.findEditorLogs()).filter((p) =>
+        this.isSafeCandidate(p, "editor log")
+      );
       if (editorPaths.length > 0) {
         let editorBytes = 0;
         for (const p of editorPaths) {
@@ -605,30 +712,10 @@ export class CleanupManager {
       }
     }
 
-    // Category 8: Trash Files (deep mode only)
-    if (mode === "deep") {
-      const trashPaths = await this.findTrashFiles();
-      if (trashPaths.length > 0) {
-        let trashBytes = 0;
-        for (const p of trashPaths) {
-          if (!allPaths.has(p)) {
-            trashBytes += await this.getFileSize(p);
-            allPaths.add(p);
-          }
-        }
-
-        if (trashBytes > 0) {
-          categories.push({
-            name: "Trash Files",
-            description: "Deleted notebooklm files in system trash",
-            paths: trashPaths,
-            totalBytes: trashBytes,
-            optional: true,
-          });
-          totalSizeBytes += trashBytes;
-        }
-      }
-    }
+    // NOTE: the former "Trash Files" category lived here and has been removed.
+    // It globbed `<Trash>/**/*notebooklm*` and deleted the matches, which is
+    // both unrecoverable and not this server's data — the Trash is exactly
+    // where a user puts something they may still want to restore.
 
     return {
       categories,
@@ -639,35 +726,67 @@ export class CleanupManager {
 
   /**
    * Perform cleanup with safety checks and detailed reporting
+   *
+   * `includeOptional` defaults to false: optional categories are reported but
+   * never deleted unless the caller explicitly opts in.
    */
   async performCleanup(
     mode: CleanupMode,
-    preserveLibrary: boolean = false
+    preserveLibrary: boolean = false,
+    includeOptional: boolean = false
   ): Promise<CleanupResult> {
     log.info(`🧹 Starting cleanup in "${mode}" mode...`);
     if (preserveLibrary) {
       log.info(`📚 Library preservation enabled - library.json will be kept!`);
     }
 
-    const { categories, totalSizeBytes } = await this.getCleanupPaths(mode, preserveLibrary);
+    const { categories } = await this.getCleanupPaths(mode, preserveLibrary);
     const deletedPaths: string[] = [];
     const failedPaths: string[] = [];
     const categorySummary: Record<string, { count: number; bytes: number }> = {};
+    // Only categories we are actually allowed to touch count towards the
+    // reported total - previously the skipped bytes were reported as deleted.
+    let eligibleSizeBytes = 0;
 
     // Delete by category
     for (const category of categories) {
+      // WHY: `optional` used to log a warning and then delete the category
+      // anyway, so opting out was impossible. Optional categories are now
+      // skipped unless the caller asks for them.
+      if (category.optional && !includeOptional) {
+        log.warning(
+          `\n⏭️  ${category.name} — skipped (optional): ${category.paths.length} items, ` +
+            `${this.formatBytes(category.totalBytes)} left untouched. ` +
+            `Pass includeOptional=true to performCleanup() to delete these.`
+        );
+        categorySummary[`${category.name} — skipped (optional)`] = { count: 0, bytes: 0 };
+        continue;
+      }
+
+      eligibleSizeBytes += category.totalBytes;
+
       log.info(
         `\n📦 ${category.name} (${category.paths.length} items, ${this.formatBytes(category.totalBytes)})`
       );
 
       if (category.optional) {
-        log.warning(`  ⚠️  Optional category - ${category.description}`);
+        log.warning(`  ⚠️  Optional category, explicitly included - ${category.description}`);
       }
 
       let categoryDeleted = 0;
       let categoryBytes = 0;
 
       for (const itemPath of category.paths) {
+        // Last line of defence before an irreversible recursive delete: a path
+        // that is not inside one of this server's own roots never gets removed,
+        // however it ended up in the category.
+        const verdict = this.isPathAllowed(itemPath);
+        if (!verdict.allowed) {
+          log.error(`  ⛔ Refusing to delete: ${itemPath} - ${verdict.reason}`);
+          failedPaths.push(`${itemPath} (refused: ${verdict.reason})`);
+          continue;
+        }
+
         try {
           if (await this.pathExists(itemPath)) {
             const size = await this.getDirectorySize(itemPath);
@@ -694,7 +813,7 @@ export class CleanupManager {
 
     if (success) {
       log.success(
-        `\n✅ Cleanup complete! Deleted ${deletedPaths.length} items (${this.formatBytes(totalSizeBytes)})`
+        `\n✅ Cleanup complete! Deleted ${deletedPaths.length} items (${this.formatBytes(eligibleSizeBytes)})`
       );
     } else {
       log.warning(`\n⚠️  Cleanup completed with ${failedPaths.length} errors`);
@@ -707,7 +826,9 @@ export class CleanupManager {
       mode,
       deletedPaths,
       failedPaths,
-      totalSizeBytes,
+      // Excludes skipped optional categories so the figure reflects what this
+      // run was actually allowed to delete.
+      totalSizeBytes: eligibleSizeBytes,
       categorySummary,
     };
   }
@@ -783,6 +904,11 @@ export class CleanupManager {
 
   /**
    * Get platform-specific path info
+   *
+   * `claudeProjectsPath` was removed along with the Claude Projects category:
+   * reporting a path this manager deliberately never touches would only invite
+   * it back. `currentBasePath` now reflects the live CONFIG, so it shows the
+   * account sub-tree when an account profile is active.
    */
   getPlatformInfo(): {
     platform: string;
@@ -790,7 +916,6 @@ export class CleanupManager {
     currentBasePath: string;
     npmCachePath: string;
     claudeCliCachePath: string;
-    claudeProjectsPath: string;
   } {
     const platform = process.platform;
     let platformName = "Unknown";
@@ -810,10 +935,9 @@ export class CleanupManager {
     return {
       platform: platformName,
       legacyBasePath: this.legacyPaths.data,
-      currentBasePath: this.currentPaths.data,
+      currentBasePath: CONFIG.dataDir,
       npmCachePath: this.getNpmCachePath(),
       claudeCliCachePath: this.getClaudeCliCachePath(),
-      claudeProjectsPath: this.getClaudeProjectsPath(),
     };
   }
 }

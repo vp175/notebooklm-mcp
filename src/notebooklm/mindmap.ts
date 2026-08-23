@@ -72,11 +72,16 @@
  *      positional slice) as its children — correct regardless of where in
  *      the DOM they land. Root's own children are the one exception: they
  *      arrive pre-rendered on load (no expansion needed, so no "before"
- *      set to diff against) and are read directly by `aria-level`. Each
- *      node's declared child count (the ", N children" aria-label suffix)
- *      is checked against what was actually captured; a mismatch is
- *      recorded as `incomplete` rather than silently returning a partial
- *      tree as if it were complete.
+ *      set to diff against) and are read directly by `aria-level`.
+ *   6. **Completeness is proven only by the declared child count** (the
+ *      ", N children" aria-label suffix) matching what was captured.
+ *      CORRECTED 2026-08-23: a mismatch was flagged as `incomplete`, but the
+ *      suffix failing to PARSE (non-English locale, reformatted label) and
+ *      the expand keypress never taking effect both fell through the same
+ *      gate and returned a truncated tree as if it were complete. Every
+ *      unverifiable outcome is now flagged with its own `reason`, and
+ *      `MindMapResult` carries a top-level `incomplete`/`incompleteNodes`
+ *      summary so a flag buried deep in the tree cannot be missed.
  */
 
 import type { Page, Frame, Locator } from "patchright";
@@ -87,27 +92,75 @@ import {
   openStructuredViewer,
   getSandboxFrame,
 } from "./studio-outputs.js";
+import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.mindmapButton;
 const READY_SELECTORS = Selectors.studio.mindmapTile;
 
-async function triggerMindMap(page: Page): Promise<void> {
-  await triggerViaDialog(page, TRIGGER_SELECTORS, "Mind Map entry");
+// `opts` must be declared and forwarded: the engine calls
+// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
+// `page` silently discards it — generation then runs over the whole
+// notebook while the tool reports success.
+async function triggerMindMap(
+  page: Page,
+  opts: StudioTriggerOptions
+): Promise<StudioTriggerOutcome> {
+  return triggerViaDialog(page, TRIGGER_SELECTORS, "Mind Map entry", {
+    customPrompt: opts.customPrompt,
+  });
 }
 
 export interface MindMapNode {
   label: string;
   children: MindMapNode[];
-  /** Present only when fewer children were captured than the node's own
-   * aria-label declared — an honest signal of a partial read, never
-   * silently dropped. Absent (rather than false) when the declared count
-   * couldn't be parsed at all (see `parseDeclaredChildCount`), since there
-   * is then nothing to verify captured children against. */
-  incomplete?: { expectedChildren: number; capturedChildren: number };
+  /**
+   * Present whenever this node's children could NOT be verified complete —
+   * an honest signal of a partial read, never silently dropped.
+   *
+   * CORRECTED 2026-08-23: this used to be set ONLY when a parsed
+   * `", N children"` suffix disagreed with what was captured, which meant
+   * the two ways a read most plausibly goes wrong — the suffix not parsing
+   * at all, and the expand keypress never taking effect — returned a
+   * truncated tree that looked complete. Now the parsed count is treated as
+   * the ONLY positive proof of completeness: when it is absent, the node is
+   * flagged with the most specific reason available.
+   *
+   * `reason`:
+   *   - `child-count-mismatch`   — suffix parsed, captured a different number.
+   *   - `expansion-unverified`   — `aria-expanded` never turned `"true"`
+   *                                within the timeout, so whatever was
+   *                                captured may be a fraction of the subtree.
+   *   - `no-children-captured`   — the node advertises children
+   *                                (`aria-expanded` present) but none were
+   *                                seen after expanding.
+   *   - `child-count-unverifiable` — expansion looked fine and children were
+   *                                captured, but the English-only
+   *                                `", N children"` suffix could not be
+   *                                parsed, so completeness is unprovable.
+   *                                In a non-English locale EVERY parent node
+   *                                carries this; that is deliberate — it is
+   *                                the truth, not a defect.
+   */
+  incomplete?: {
+    reason:
+      | "child-count-mismatch"
+      | "expansion-unverified"
+      | "no-children-captured"
+      | "child-count-unverifiable";
+    /** Declared count from the aria-label suffix; absent when unparseable. */
+    expectedChildren?: number;
+    capturedChildren: number;
+  };
 }
 
 export interface MindMapResult {
   root: MindMapNode;
+  /** Present only when at least one node carries `incomplete` — a
+   * top-level summary so a caller cannot miss a partial read buried deep in
+   * the tree. */
+  incomplete?: true;
+  /** How many nodes carry an `incomplete` flag (present with `incomplete`). */
+  incompleteNodes?: number;
 }
 
 const CHILD_COUNT_SUFFIX = /,\s*(\d+)\s+children?$/i;
@@ -187,6 +240,10 @@ async function expandAndCaptureNode(
   if (ariaExpanded === null) return { label, children: [] };
 
   let newItems: FlatTreeItem[];
+  // The root arrives already expanded, so there is nothing to verify there;
+  // every other node's expansion is only "verified" if `aria-expanded`
+  // actually committed to `"true"` within the timeout.
+  let expansionVerified = true;
   if (ariaExpanded === "true") {
     // Only the root arrives already expanded, with its direct children
     // pre-rendered on load rather than appended dynamically — there is no
@@ -198,7 +255,7 @@ async function expandAndCaptureNode(
     await itemLocator.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => undefined);
     await itemLocator.focus({ timeout: 5_000 }).catch(() => undefined);
     await page.keyboard.press("Enter");
-    await waitForExpanded(itemLocator, page);
+    expansionVerified = await waitForExpanded(itemLocator, page);
     await waitForTreeSettled(frame, page);
     const after = await readFlatTreeItems(frame);
     // A newly-revealed child does NOT reliably land at the tail of the
@@ -238,10 +295,33 @@ async function expandAndCaptureNode(
   }
 
   const node: MindMapNode = { label, children };
-  if (declaredChildren !== null && children.length !== declaredChildren) {
-    node.incomplete = { expectedChildren: declaredChildren, capturedChildren: children.length };
+  // A parsed `", N children"` suffix that matches what was captured is the
+  // ONLY positive proof this node's subtree is complete. Every other outcome
+  // is flagged — previously the `declaredChildren !== null &&` gate meant an
+  // unparseable suffix (or a keypress that never expanded anything) returned
+  // a truncated tree that looked complete, bypassing this module's own
+  // partial-read convention.
+  if (declaredChildren !== null) {
+    if (children.length !== declaredChildren) {
+      node.incomplete = {
+        reason: "child-count-mismatch",
+        expectedChildren: declaredChildren,
+        capturedChildren: children.length,
+      };
+    }
+  } else if (!expansionVerified) {
+    node.incomplete = { reason: "expansion-unverified", capturedChildren: children.length };
+  } else if (children.length === 0) {
+    node.incomplete = { reason: "no-children-captured", capturedChildren: 0 };
+  } else {
+    node.incomplete = { reason: "child-count-unverifiable", capturedChildren: children.length };
   }
   return node;
+}
+
+/** Counts nodes carrying an `incomplete` flag, for the result-level summary. */
+function countIncompleteNodes(node: MindMapNode): number {
+  return (node.incomplete ? 1 : 0) + node.children.reduce((n, c) => n + countIncompleteNodes(c), 0);
 }
 
 /**
@@ -294,15 +374,22 @@ async function extractMindMap(page: Page): Promise<MindMapResult> {
   // DOM order — live-confirmed: on some opens the widget auto-focuses a
   // different branch, reordering it first in the DOM while it is really a
   // level-3+ descendant. `aria-level="1"` is the reliable identifier.
-  const root = frame.locator('[role="treeitem"][aria-level="1"]').first();
-  return { root: await expandAndCaptureNode(frame, page, root) };
+  const rootLocator = frame.locator('[role="treeitem"][aria-level="1"]').first();
+  const root = await expandAndCaptureNode(frame, page, rootLocator);
+  const incompleteNodes = countIncompleteNodes(root);
+  // Surface partiality at the top level too: a single flagged node buried
+  // several levels down is easy to miss in a large tree.
+  return incompleteNodes > 0 ? { root, incomplete: true, incompleteNodes } : { root };
 }
 
+// Kind ("structured") comes from STRUCTURED_KIND_TYPES via `studioKindOf`
+// in the engine, not from this object — see studio-outputs.ts.
 registerStudioStrategy("mindmap", {
-  kind: "structured",
   triggerSelectors: TRIGGER_SELECTORS,
   // No in-progress DOM/text was observed live this session (mirrors the
-  // same empty-array convention used by video-overview.ts/slides.ts).
+  // same empty-array convention used by video-overview.ts/slides.ts). An
+  // empty list means the engine has no DOM signal for this type at all —
+  // repeat-call protection comes from its in-flight record instead.
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,
   trigger: triggerMindMap,

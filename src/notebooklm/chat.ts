@@ -18,6 +18,7 @@
 import type { Page } from "patchright";
 import { Selectors } from "./selectors.js";
 import { isRecoverable, pageIsAlive, safeSleep } from "../browser/watchdog.js";
+import { RateLimitError } from "../errors.js";
 
 /**
  * Loading-state phrases NotebookLM streams into the answer container before
@@ -172,13 +173,39 @@ const RATE_LIMIT_MESSAGES = [
   "1日あたりの上限に達しました",
 ];
 
+/**
+ * Recognise a loading banner — and *only* a loading banner.
+ *
+ * WHY the shape test: the previous rule was `lower.includes(snippet)` over a
+ * list containing ordinary words ("thinking", "searching", "loading",
+ * "reviewing content", "gathering the facts"). Any genuine answer that merely
+ * used one of those words was classified as a placeholder on every poll, so
+ * `waitForStableAnswer` never accepted it and the call burned the full
+ * 10-minute timeout before returning `null` ("no answer").
+ *
+ * A placeholder must now satisfy BOTH:
+ *   (a) it is banner-shaped — short (< 200 chars) or carrying no
+ *       sentence-ending punctuation; a real answer is long *and* punctuated;
+ *   (b) a snippet is the whole trimmed text or opens it — never a substring
+ *       buried mid-answer.
+ * The legacy "short text ending in ..." rule is kept as an independent path.
+ */
 function isPlaceholder(text: string): boolean {
-  const lower = text.toLowerCase();
-  if (PLACEHOLDER_SNIPPETS.some((s) => lower.includes(s))) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
   // Short text ending with "..." is almost certainly a loading indicator;
   // real responses run well past 50 chars.
-  if (text.length < 50 && text.trim().endsWith("...")) return true;
-  return false;
+  if (trimmed.length < 50 && trimmed.endsWith("...")) return true;
+
+  // (a) banner-shaped?
+  const bannerShaped = trimmed.length < 200 || !/[.!?。！？]/.test(trimmed);
+  if (!bannerShaped) return false;
+
+  // (b) snippet at the start (leading glyphs/quotes — "⏳ Thinking…" — first
+  // stripped) or as the entire text.
+  const lower = trimmed.toLowerCase().replace(/^[^\p{L}\p{N}]+/u, "");
+  return PLACEHOLDER_SNIPPETS.some((s) => lower === s || lower.startsWith(s));
 }
 
 function isErrorMessage(text: string): boolean {
@@ -189,6 +216,16 @@ function isErrorMessage(text: string): boolean {
 function isRateLimitText(text: string): boolean {
   const lower = text.toLowerCase();
   return RATE_LIMIT_MESSAGES.some((s) => lower.includes(s));
+}
+
+/**
+ * Condense a NotebookLM banner into one bounded line for an Error message —
+ * the raw banner can be multi-line and arbitrarily long, and it ends up in
+ * the tool's user-facing `error` string.
+ */
+function banner(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > 200 ? `${oneLine.slice(0, 199)}…` : oneLine;
 }
 
 export interface AskOptions {
@@ -205,24 +242,48 @@ export interface AskOptions {
 }
 
 /**
+ * Comparison key for "is this the same answer text?".
+ *
+ * Runs of whitespace are collapsed so that a prior answer NotebookLM
+ * re-renders with cosmetically different wrapping still matches its snapshot
+ * instead of looking like a brand-new turn.
+ */
+function answerKey(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
  * Snapshot every visible assistant answer text *before* a new question is
  * submitted. Pass the result into `waitForStableAnswer({ ignoreTexts })` so
  * the new turn isn't confused with prior turns in the same session.
+ *
+ * WHY sanitised: this used to return raw `innerText`, while the live
+ * comparison in `waitForStableAnswer` sees `sanitizeAnswer(raw)`. As soon as
+ * a prior answer contained UI-control leakage (`more_vert`, a lone citation
+ * digit, …) the raw snapshot could never equal the sanitised candidate, so
+ * the *previous* turn's answer was not recognised as prior — and, being
+ * already stable, was returned verbatim as the answer to the new question.
  */
 export async function snapshotPriorAnswers(page: Page): Promise<string[]> {
   return page
     .locator(Selectors.chat.answerText)
     .allInnerTexts()
-    .then((texts) => texts.map((t) => t.trim()).filter(Boolean))
+    .then((texts) => texts.map((t) => sanitizeAnswer(t)).filter(Boolean))
     .catch(() => []);
 }
 
 /**
  * Wait for the *latest* answer text to appear and stabilise.
  *
- * Returns the sanitised final text, or `null` on timeout. The function never
- * throws on UI hiccups — failure surfaces as `null` so the caller can decide
- * how to recover (retry vs. report error to the user).
+ * Returns the sanitised final text, or `null` on timeout. Ordinary UI hiccups
+ * never surface as exceptions — they are retried on the next poll — but three
+ * conditions do throw, because they are not "no answer yet":
+ *   - `RateLimitError` when NotebookLM renders a quota banner;
+ *   - a plain `Error` when it renders a hard-error banner;
+ *   - a plain `Error` when the renderer stops answering the health check.
+ * `browser-session.ts#ask()` lets all three propagate; `handleAskQuestion`
+ * already special-cases `RateLimitError` and reports the rest as a failure —
+ * which is the point: a banner must not be reported as a successful answer.
  */
 export async function waitForStableAnswer(
   page: Page,
@@ -238,7 +299,17 @@ export async function waitForStableAnswer(
 
   const deadline = Date.now() + timeoutMs;
   const echoLower = question.trim().toLowerCase();
-  const ignoreSet = new Set(ignoreTexts.map((t) => t.trim()).filter(Boolean));
+  // Ignore-list keys hold BOTH the raw snapshot text and its sanitised form.
+  // `snapshotPriorAnswers` now sanitises, but the legacy fallback snapshot in
+  // browser-session.ts still hands over raw `innerText`, and only a sanitised
+  // key can ever equal a candidate coming out of `readLatestAnswer`.
+  const ignoreKeys = new Set<string>();
+  for (const text of ignoreTexts) {
+    const raw = answerKey(text);
+    if (raw) ignoreKeys.add(raw);
+    const cleaned = answerKey(sanitizeAnswer(text));
+    if (cleaned) ignoreKeys.add(cleaned);
+  }
   // Hard ceiling on poll iterations defends against pathological
   // pollIntervalMs values combined with zombie-page sleep returns (issue #16).
   const maxPolls = Math.max(8, Math.ceil(timeoutMs / Math.max(50, pollIntervalMs)) + 4);
@@ -266,7 +337,7 @@ export async function waitForStableAnswer(
 
     if (candidate) {
       const isEcho = candidate.toLowerCase() === echoLower;
-      const isPrior = ignoreSet.has(candidate);
+      const isPrior = ignoreKeys.has(answerKey(candidate));
 
       if (!isEcho && !isPrior) {
         // Loading placeholders ("Parsing the data…", "Thinking…", …) are
@@ -279,10 +350,20 @@ export async function waitForStableAnswer(
           continue;
         }
 
-        // Hard errors and rate-limit messages can be returned immediately —
-        // there is no "stable" follow-up text coming.
-        if (isErrorMessage(candidate) || isRateLimitText(candidate)) {
-          return candidate;
+        // Hard errors and rate-limit banners still short-circuit the wait —
+        // no "stable" follow-up text is coming — but they must NOT be handed
+        // back as if they were the answer: the caller reported the banner
+        // text to the user as a successful response. Throwing keeps this
+        // function's signature intact while making the outcome unmistakable.
+        // Rate limit is tested first: a quota banner often also contains
+        // "try again later", which is an ERROR_SNIPPETS phrase.
+        if (isRateLimitText(candidate)) {
+          throw new RateLimitError(
+            `NotebookLM rate limit reached (50 queries/day for free accounts): ${banner(candidate)}`
+          );
+        }
+        if (isErrorMessage(candidate)) {
+          throw new Error(`NotebookLM returned an error: ${banner(candidate)}`);
         }
 
         if (candidate === lastSeen) {

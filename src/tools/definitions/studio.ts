@@ -1,14 +1,25 @@
 /**
- * MCP tool definitions for the generic Studio-output engine (Task 7).
+ * MCP tool definitions for the generic Studio-output engine.
  *
- * These 4 tools expose all 9 `StudioOutputType` values through one
- * generate/poll/download-or-extract shape. Only `audio` is registered with
- * a live strategy as of Task 7 (see studio-outputs.ts); the other 8 types
- * are accepted by the schema but return a clear "not yet implemented"
- * error until later tasks register their strategies.
+ * These 4 tools expose the `StudioOutputType` values through one
+ * generate/poll/download-or-extract shape. Eight of the nine types have a
+ * live strategy (see studio-outputs.ts): audio, video, infographic and slides
+ * are FILE kinds (fetched with download_studio_output); mindmap, datatable,
+ * quiz and flashcards are STRUCTURED kinds (read with
+ * get_studio_output_content). Only `report` is unimplemented and returns a
+ * clear error.
+ *
+ * The type lists below are imported from the engine rather than hand-rolled,
+ * so a change to the engine's kind classification cannot silently leave these
+ * schemas advertising the wrong thing.
  */
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ALL_STUDIO_TYPES,
+  FILE_KIND_TYPES,
+  STRUCTURED_KIND_TYPES,
+} from "../../notebooklm/studio-outputs.js";
 
 const sharedNotebookTargeting = {
   session_id: {
@@ -22,36 +33,28 @@ const sharedNotebookTargeting = {
   notebook_url: { type: "string", description: "Direct NotebookLM URL — overrides notebook_id." },
 };
 
-const ALL_TYPES = [
-  "audio",
-  "video",
-  "report",
-  "slides",
-  "infographic",
-  "mindmap",
-  "datatable",
-  "quiz",
-  "flashcards",
-];
-const FILE_TYPES = ["audio", "video", "report", "slides", "infographic"];
-const STRUCTURED_TYPES = ["mindmap", "datatable", "quiz", "flashcards"];
+// Single source of truth: the engine's own kind classification.
+const ALL_TYPES = [...ALL_STUDIO_TYPES];
+const FILE_TYPES = [...FILE_KIND_TYPES];
+const STRUCTURED_TYPES = [...STRUCTURED_KIND_TYPES];
 
 export const generateStudioOutputTool: Tool = {
   name: "generate_studio_output",
   description:
     "Trigger generation of any NotebookLM Studio output. **Async by default** " +
     "— returns immediately with status `started`/`in_progress`/`ready`. " +
-    "`audio`, `video`, `infographic`, and `slides` are implemented by this " +
-    'server today; other types in the enum return a clear "not yet ' +
-    'implemented" error (Phase 2). KNOWN LIMITATION: status reporting ' +
-    "during generation is currently unreliable (a real ~7-min generation " +
-    "was observed reporting not_started throughout) — avoid calling this " +
-    "twice for the same output_type in quick succession, as the in-progress " +
-    "guard may not catch it and a second call could start a duplicate " +
-    "generation. Workflow: generate_studio_output → poll " +
-    "get_studio_output_status → download_studio_output (file kinds: audio/" +
-    "video/report/slides/infographic) or get_studio_output_content " +
-    "(structured kinds: mindmap/datatable/quiz/flashcards).",
+    "Eight of the nine types are implemented: `audio`, `video`, " +
+    "`infographic`, `slides` (file kinds) and `mindmap`, `datatable`, " +
+    "`quiz`, `flashcards` (structured kinds). Only `report` returns a clear " +
+    '"not yet implemented" error. KNOWN LIMITATION: mid-generation status ' +
+    "reporting is only partly reliable. This server remembers generations " +
+    "IT started (so a repeat call returns `in_progress` instead of starting " +
+    "a duplicate), and it also looks for an in-progress tile in the page, " +
+    "but a generation started elsewhere — the NotebookLM web UI, another " +
+    "process — may still read as `not_started` until its tile appears. " +
+    "Poll rather than re-triggering. Workflow: generate_studio_output → " +
+    "poll get_studio_output_status → download_studio_output (file kinds) or " +
+    "get_studio_output_content (structured kinds).",
   inputSchema: {
     type: "object",
     properties: {
@@ -62,11 +65,19 @@ export const generateStudioOutputTool: Tool = {
       },
       custom_prompt: {
         type: "string",
-        description: "Optional focus prompt, passed into the Customize dialog before generation.",
+        description:
+          "Optional focus prompt, typed into the Customize dialog before " +
+          "generation. Honoured by every implemented type whose Customize " +
+          "dialog exposes a prompt field; where the dialog has no such field " +
+          "it is ignored.",
       },
       difficulty: {
         type: "string",
-        description: "Only used by quiz/flashcards (Phase 2). Ignored by other types.",
+        description:
+          "ACCEPTED BUT NOT WIRED UP: no verified selector exists for the " +
+          "Customize dialog's difficulty control, so generation always uses " +
+          "the dialog's default. Passing this returns a warning in " +
+          "`result.warnings` rather than silently pretending it applied.",
       },
       wait_for_completion: {
         type: "boolean",
@@ -161,7 +172,12 @@ export const downloadStudioOutputTool: Tool = {
       },
       destination_dir: {
         type: "string",
-        description: "Absolute directory path where the file is saved (created if missing).",
+        description:
+          "Absolute directory path where the file is saved (created if " +
+          "missing). A relative path is rejected. An existing file is never " +
+          "overwritten — the download is saved as `name (2).ext` and the " +
+          "path actually written is returned in `result.filePath`, with the " +
+          "byte count in `result.bytes`.",
       },
       show_browser: {
         type: "boolean",

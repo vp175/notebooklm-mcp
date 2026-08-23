@@ -52,12 +52,22 @@ import {
   openStructuredViewer,
   getSandboxFrame,
 } from "./studio-outputs.js";
+import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.flashcardsButton;
 const READY_SELECTORS = Selectors.studio.flashcardsTile;
 
-async function triggerFlashcards(page: Page): Promise<void> {
-  await triggerViaDialog(page, TRIGGER_SELECTORS, "Flashcards entry");
+// `opts` must be declared and forwarded: the engine calls
+// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
+// `page` silently discards it — generation then runs over the whole
+// notebook while the tool reports success.
+async function triggerFlashcards(
+  page: Page,
+  opts: StudioTriggerOptions
+): Promise<StudioTriggerOutcome> {
+  return triggerViaDialog(page, TRIGGER_SELECTORS, "Flashcards entry", {
+    customPrompt: opts.customPrompt,
+  });
 }
 
 export interface Flashcard {
@@ -175,11 +185,14 @@ async function extractFlashcards(page: Page): Promise<FlashcardsResult> {
   return missingPositions.length > 0 ? { cards, missingPositions } : { cards };
 }
 
+// Kind ("structured") comes from STRUCTURED_KIND_TYPES via `studioKindOf`
+// in the engine, not from this object — see studio-outputs.ts.
 registerStudioStrategy("flashcards", {
-  kind: "structured",
   triggerSelectors: TRIGGER_SELECTORS,
   // No in-progress DOM/text was observed live this session (mirrors the
-  // same empty-array convention used by video-overview.ts/slides.ts).
+  // same empty-array convention used by video-overview.ts/slides.ts). An
+  // empty list means the engine has no DOM signal for this type at all —
+  // repeat-call protection comes from its in-flight record instead.
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,
   trigger: triggerFlashcards,

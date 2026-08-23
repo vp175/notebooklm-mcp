@@ -18,6 +18,7 @@ import { SharedContextManager } from "./shared-context-manager.js";
 import { CONFIG } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { SessionInfo } from "../types.js";
+import { parseNotebookUrl } from "../library/notebook-library.js";
 import { randomBytes } from "crypto";
 
 export class SessionManager {
@@ -27,6 +28,13 @@ export class SessionManager {
   private maxSessions: number;
   private sessionTimeout: number;
   private cleanupInterval?: NodeJS.Timeout;
+  /**
+   * Sessions currently executing a tool operation. The idle sweeper and the
+   * max-sessions eviction both skip these: `lastActivity` does not advance
+   * during a long operation, so without this a session gets closed underneath
+   * the request that is using it.
+   */
+  private busySessions: Set<string> = new Set();
 
   constructor(authManager: AuthManager) {
     this.authManager = authManager;
@@ -78,13 +86,26 @@ export class SessionManager {
     overrideHeadless?: boolean
   ): Promise<BrowserSession> {
     // Determine target notebook URL
-    const targetUrl = (notebookUrl || CONFIG.notebookUrl || "").trim();
-    if (!targetUrl) {
+    const rawUrl = (notebookUrl || CONFIG.notebookUrl || "").trim();
+    if (!rawUrl) {
       throw new Error("Notebook URL is required to create a session");
     }
-    if (!targetUrl.startsWith("http")) {
-      throw new Error("Notebook URL must be an absolute URL");
+
+    // Hard allowlist. `startsWith("http")` was the ONLY check, so any caller
+    // (or any URL previously stored in library.json, which was equally
+    // unvalidated) could point this at an arbitrary origin — and the session
+    // then drives the SIGNED-IN, persistent Chrome profile there, exposes the
+    // Google session storage this server restores to that page, and returns
+    // whatever text it finds as if it were a NotebookLM answer.
+    const parsed = parseNotebookUrl(rawUrl);
+    if (!parsed) {
+      throw new Error(
+        `Refusing to open "${rawUrl}": not a NotebookLM notebook URL. ` +
+          `Expected https://notebook.google.com/notebook/<uuid> ` +
+          `(legacy https://notebooklm.google.com/notebook/<uuid> is also accepted).`
+      );
     }
+    const targetUrl = parsed.url;
 
     // Generate ID if not provided
     if (!sessionId) {
@@ -112,7 +133,12 @@ export class SessionManager {
     // Return existing session if found
     if (this.sessions.has(sessionId)) {
       const session = this.sessions.get(sessionId)!;
-      if (session.notebookUrl !== targetUrl) {
+      // Compare CANONICAL forms. A session opened from a stored legacy-host
+      // URL and a request naming the same notebook on the current host are the
+      // same notebook; a raw string comparison treated them as different and
+      // silently destroyed the session to "retarget" it at itself.
+      const sessionCanonical = parseNotebookUrl(session.notebookUrl)?.url ?? session.notebookUrl;
+      if (sessionCanonical !== targetUrl) {
         log.warning(`♻️  Replacing session ${sessionId} with new notebook URL`);
         await session.close();
         this.sessions.delete(sessionId);
@@ -171,6 +197,27 @@ export class SessionManager {
   }
 
   /**
+   * Run `fn` with a session marked busy, so neither the idle sweeper nor the
+   * max-sessions eviction can close it mid-operation. Always releases, and
+   * refreshes `lastActivity` on the way out so a just-finished long operation
+   * does not immediately look idle.
+   */
+  async withSessionBusy<T>(session: BrowserSession, fn: () => Promise<T>): Promise<T> {
+    const id = session.sessionId;
+    this.busySessions.add(id);
+    try {
+      return await fn();
+    } finally {
+      this.busySessions.delete(id);
+      try {
+        session.updateActivity();
+      } catch {
+        /* session may already be closed — nothing to refresh */
+      }
+    }
+  }
+
+  /**
    * Close and remove a specific session
    */
   async closeSession(sessionId: string): Promise<boolean> {
@@ -224,6 +271,14 @@ export class SessionManager {
     const inactiveSessions: string[] = [];
 
     for (const [sessionId, session] of this.sessions.entries()) {
+      // `lastActivity` only advances when a session is handed out, so a
+      // long-running operation (a 10-minute audio generation, a mind-map
+      // expansion) looks idle to this sweeper the whole time it runs. Closing
+      // a busy session pulls the page out from under the operation, which
+      // surfaces to the caller as an unexplained "Target closed".
+      if (this.busySessions.has(sessionId)) {
+        continue;
+      }
       if (session.isExpired(this.sessionTimeout)) {
         inactiveSessions.push(sessionId);
       }
@@ -266,11 +321,15 @@ export class SessionManager {
       return false;
     }
 
-    // Find oldest session
+    // Find the oldest session that is not mid-operation. Evicting by creation
+    // time alone force-closed the page of a session that was actively
+    // answering a question — the caller got a "Target closed" error for work
+    // that was proceeding fine.
     let oldestId: string | null = null;
     let oldestTime = Infinity;
 
     for (const [sessionId, session] of this.sessions.entries()) {
+      if (this.busySessions.has(sessionId)) continue;
       if (session.createdAt < oldestTime) {
         oldestTime = session.createdAt;
         oldestId = sessionId;
@@ -278,6 +337,7 @@ export class SessionManager {
     }
 
     if (!oldestId) {
+      log.warning("  ⚠️  Every session is currently busy — nothing can be evicted");
       return false;
     }
 

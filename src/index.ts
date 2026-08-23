@@ -33,7 +33,12 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Tool, ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+} from "@modelcontextprotocol/sdk/types.js";
 
 import type { ProgressCallback } from "./types.js";
 import { AuthManager } from "./auth/auth-manager.js";
@@ -41,6 +46,7 @@ import { applyAccountToConfig, getRequestedAccount } from "./auth/account-switch
 import { SessionManager } from "./session/session-manager.js";
 import { NotebookLibrary } from "./library/notebook-library.js";
 import { ToolHandlers, buildToolDefinitions } from "./tools/index.js";
+import { validateToolArgs } from "./tools/validate-args.js";
 import { ResourceHandlers } from "./resources/resource-handlers.js";
 import { SettingsManager } from "./utils/settings-manager.js";
 import { CliHandler } from "./utils/cli-handler.js";
@@ -95,6 +101,19 @@ conversational context (NotebookLM uses session-RAG so follow-ups get
 sharper). \`list_sessions\` enumerates live sessions; \`reset_session\`
 clears chat history (same id), \`close_session\` ends a session.
 
+A follow-up that passes only \`session_id\` stays on that session's own
+notebook — it is NOT retargeted at whatever notebook is currently active.
+To move to a different notebook, start a new session (omit
+\`session_id\`) or pass \`notebook_id\`/\`notebook_url\` explicitly.
+If the \`session_id\` you pass is not a live session, a new one answers
+and the response carries a \`session_note\` saying so — the earlier
+conversation's context is gone.
+
+Every browser-touching tool (\`add_source\`, the audio tools, the studio
+tools) also returns the \`session_id\` it used. Reuse it for the next call
+on the same notebook, and \`close_session\` it when finished instead of
+leaving it to idle out.
+
 ## Source ingestion (multi-source)
 
 Call \`add_source\` once per source — text snippets and URLs are supported.
@@ -134,22 +153,45 @@ For synchronous behaviour pass \`wait_for_completion: true\` to
   "not yet implemented" error (Phase 2) — its trigger dialog is
   live-confirmed but its completed-content viewer still needs DOM
   reconnaissance before extraction can be built.
-- KNOWN LIMITATION: mid-generation status reporting is currently
-  unreliable — avoid calling \`generate_studio_output\` twice for the same
-  \`output_type\` in quick succession, since the in-progress guard may not
-  catch an already-running generation.
+- KNOWN LIMITATION: mid-generation status reporting is only partly
+  reliable. This server remembers generations IT started, so a repeat
+  \`generate_studio_output\` for the same type returns \`in_progress\`
+  rather than starting a duplicate, and it also looks for an in-progress
+  tile on the page. A generation started ELSEWHERE (the NotebookLM web UI,
+  another process) can still read as \`not_started\` until its tile
+  appears — poll instead of re-triggering.
+- \`difficulty\` on \`generate_studio_output\` is accepted but not wired
+  into the Customize dialog; passing it returns a warning in
+  \`result.warnings\` and the default difficulty is used.
+- Citations: pass \`source_format\` other than \`none\` on
+  \`ask_question\` to get a \`sources\` array. If the answer carried no
+  citation markers you get \`sources_note\` explaining that, rather than a
+  silently missing field.
+- Downloads require an ABSOLUTE \`destination_dir\` (created if missing);
+  a relative path is rejected, and an existing file is never overwritten.
 `;
 
 /**
- * MCP progress tokens are carried in `_meta.progressToken` on the tool-call
- * arguments object. The SDK types arguments as `Record<string, unknown>`,
- * so we narrow defensively.
+ * MCP progress tokens live in `params._meta.progressToken` — a sibling of
+ * `params.arguments`, NOT a key inside the arguments object.
+ *
+ * This used to read `arguments._meta.progressToken`, which no compliant client
+ * ever populates, so `sendProgress` was gated on a token that was always
+ * undefined and **not a single progress notification was ever emitted** (a live
+ * MCP client run recorded 0 notifications across a 26-second `ask_question`).
+ * We read the spec location first and keep the old one as a tolerated fallback
+ * for any caller that copied the previous behaviour.
  */
-function extractProgressToken(
-  args: Record<string, unknown> | undefined
-): string | number | undefined {
-  if (!args || typeof args !== "object") return undefined;
-  const meta = (args as { _meta?: unknown })._meta;
+function extractProgressToken(params: {
+  _meta?: unknown;
+  arguments?: Record<string, unknown>;
+}): string | number | undefined {
+  const fromMeta = readProgressToken(params?._meta);
+  if (fromMeta !== undefined) return fromMeta;
+  return readProgressToken(params?.arguments?._meta);
+}
+
+function readProgressToken(meta: unknown): string | number | undefined {
   if (!meta || typeof meta !== "object") return undefined;
   const token = (meta as { progressToken?: unknown }).progressToken;
   return typeof token === "string" || typeof token === "number" ? token : undefined;
@@ -167,14 +209,61 @@ class NotebookLMMCPServer {
   private resourceHandlers: ResourceHandlers;
   private settingsManager: SettingsManager;
   private toolDefinitions: Tool[];
-  private toolDispatch: Map<
-    string,
-    (args: Record<string, unknown> | undefined, sendProgress: ProgressCallback) => Promise<unknown>
-  >;
+  /** Set when shutdown was triggered by a crash, so we exit non-zero. */
+  private shutdownFailed = false;
+  /** Installed by `start()` for the stdio transport (see setupShutdownHandlers). */
+  private stdinShutdownHook?: () => void;
+  /** Closeable handle for the HTTP transport, when that transport is in use. */
+  private httpHandle?: { close: () => Promise<void> };
 
   constructor() {
-    // Initialize MCP Server
-    this.server = new Server(
+    // Initialize managers (shared by every connection)
+    this.authManager = new AuthManager();
+    this.sessionManager = new SessionManager(this.authManager);
+    this.library = new NotebookLibrary();
+    this.settingsManager = new SettingsManager();
+    this.resourceHandlers = new ResourceHandlers(this.library);
+
+    // The primary connection. `createConnection()` can be called again per
+    // HTTP session — see `start()`.
+    const primary = this.createConnection();
+    this.server = primary.server;
+    this.toolHandlers = primary.toolHandlers;
+
+    // Build and Filter tool definitions.
+    //
+    // These are only the STARTUP snapshot, kept for the banner. The live
+    // handlers rebuild on every request: `ask_question`'s description is
+    // generated from the library's active notebook, so a snapshot taken in the
+    // constructor kept advertising whatever notebook was active when the
+    // process started, even after `select_notebook` / `add_notebook` /
+    // `discover_notebooks` changed it.
+    this.toolDefinitions = this.getActiveTools();
+
+    this.setupShutdownHandlers();
+
+    const activeSettings = this.settingsManager.getEffectiveSettings();
+    log.info("🚀 NotebookLM MCP Server initialized");
+    log.info(`  Version: 2.0.0`);
+    log.info(`  Node: ${process.version}`);
+    log.info(`  Platform: ${process.platform}`);
+    log.info(`  Profile: ${activeSettings.profile} (${this.toolDefinitions.length} tools active)`);
+  }
+
+  /**
+   * Build one MCP `Server` instance with its own handler set.
+   *
+   * WHY a factory: the SDK's `Server.connect()` binds exactly one transport
+   * per instance and throws on a second call. The HTTP transport creates a
+   * transport per session, so re-using a single `Server` meant the *second*
+   * concurrent HTTP client crashed the request handler and got a 500 — the
+   * multi-session support the transport advertises did not exist. Each
+   * connection now gets its own `Server` (and its own `ToolHandlers`, so
+   * elicitation is routed back to the client that asked), while all real state
+   * — sessions, browser context, library — stays in the shared managers.
+   */
+  private createConnection(): { server: Server; toolHandlers: ToolHandlers } {
+    const server = new Server(
       {
         name: "notebooklm-mcp",
         version: "2.0.0",
@@ -201,12 +290,6 @@ class NotebookLMMCPServer {
         instructions: SERVER_INSTRUCTIONS,
       }
     );
-
-    // Initialize managers
-    this.authManager = new AuthManager();
-    this.sessionManager = new SessionManager(this.authManager);
-    this.library = new NotebookLibrary();
-    this.settingsManager = new SettingsManager();
 
     // Initialize handlers
     //
@@ -237,12 +320,12 @@ class NotebookLMMCPServer {
     //      (e.g. `remove_notebook`, a destructive tool) must catch this
     //      specific error type and refuse to proceed rather than treating a
     //      failed request the same as "capability not declared".
-    this.toolHandlers = new ToolHandlers(
+    const toolHandlers = new ToolHandlers(
       this.sessionManager,
       this.authManager,
       this.library,
       async (message, schema) => {
-        if (!this.server.getClientCapabilities()?.elicitation) {
+        if (!server.getClientCapabilities()?.elicitation) {
           return undefined;
         }
         try {
@@ -251,7 +334,7 @@ class NotebookLMMCPServer {
           // (discriminated-union) requestedSchema type — the handlers only
           // ever pass a valid `{ type: "object", properties, required }`
           // shape, so this cast is safe.
-          return await this.server.elicitInput({
+          return await server.elicitInput({
             message,
             requestedSchema: schema as ElicitRequestFormParams["requestedSchema"],
           });
@@ -264,23 +347,19 @@ class NotebookLMMCPServer {
         }
       }
     );
-    this.resourceHandlers = new ResourceHandlers(this.library);
-    this.toolDispatch = this.buildToolDispatch();
 
-    // Build and Filter tool definitions
+    this.setupHandlers(server, this.buildToolDispatch(toolHandlers));
+    return { server, toolHandlers };
+  }
+
+  /**
+   * The tools this server currently exposes: rebuilt from the live library so
+   * dynamic descriptions stay current, then filtered by the active profile /
+   * `disabledTools` setting.
+   */
+  private getActiveTools(): Tool[] {
     const allTools = buildToolDefinitions(this.library) as Tool[];
-    this.toolDefinitions = this.settingsManager.filterTools(allTools);
-
-    // Setup handlers
-    this.setupHandlers();
-    this.setupShutdownHandlers();
-
-    const activeSettings = this.settingsManager.getEffectiveSettings();
-    log.info("🚀 NotebookLM MCP Server initialized");
-    log.info(`  Version: 2.0.0`);
-    log.info(`  Node: ${process.version}`);
-    log.info(`  Platform: ${process.platform}`);
-    log.info(`  Profile: ${activeSettings.profile} (${this.toolDefinitions.length} tools active)`);
+    return this.settingsManager.filterTools(allTools);
   }
 
   /**
@@ -291,11 +370,13 @@ class NotebookLMMCPServer {
    * from its own declaration in `handlers.ts`, so it cannot silently drift
    * out of sync with the handler signatures.
    */
-  private buildToolDispatch(): Map<
+  private buildToolDispatch(
+    handlers: ToolHandlers
+  ): Map<
     string,
     (args: Record<string, unknown> | undefined, sendProgress: ProgressCallback) => Promise<unknown>
   > {
-    const h = this.toolHandlers;
+    const h = handlers;
     return new Map<
       string,
       (
@@ -403,32 +484,69 @@ class NotebookLMMCPServer {
   /**
    * Setup MCP request handlers
    */
-  private setupHandlers(): void {
+  private setupHandlers(
+    server: Server,
+    toolDispatch: Map<
+      string,
+      (
+        args: Record<string, unknown> | undefined,
+        sendProgress: ProgressCallback
+      ) => Promise<unknown>
+    >
+  ): void {
     // Register Resource Handlers (Resources, Templates, Completions)
-    this.resourceHandlers.registerHandlers(this.server);
+    this.resourceHandlers.registerHandlers(server);
 
-    // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // List available tools. Rebuilt per request so `ask_question`'s
+    // library-derived description reflects the CURRENT active notebook.
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       log.info("📋 [MCP] list_tools request received");
+      this.toolDefinitions = this.getActiveTools();
       return {
         tools: this.toolDefinitions,
       };
     });
 
     // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
-      const progressToken = extractProgressToken(args);
+      const progressToken = extractProgressToken(request.params);
 
       log.info(`🔧 [MCP] Tool call: ${name}`);
       if (progressToken) {
         log.info(`  📊 Progress token: ${progressToken}`);
       }
 
-      // Create progress callback function
+      // Resolve the tool definition from the LIVE set so profile filtering and
+      // schema validation both act on what this server actually advertises.
+      const activeTools = this.getActiveTools();
+      const tool = activeTools.find((t) => t.name === name);
+      const declaresOutputSchema = tool?.outputSchema !== undefined;
+
+      /**
+       * A tool-level failure. Tools that declare an `outputSchema` MUST set the
+       * protocol-level `isError` when they do not return `structuredContent` —
+       * an SDK-based client otherwise rejects the result with "Tool X has an
+       * output schema but did not return structured content".
+       */
+      const failure = (message: string, withIsError = declaresOutputSchema) => ({
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: false, error: message }, null, 2),
+          },
+        ],
+        ...(withIsError ? { isError: true } : {}),
+      });
+
+      // Create progress callback function.
+      // Progress is best-effort telemetry: a transport hiccup here must never
+      // discard an otherwise-successful tool result, so failures are logged
+      // and swallowed rather than propagated.
       const sendProgress = async (message: string, progress?: number, total?: number) => {
-        if (progressToken) {
-          await this.server.notification({
+        if (!progressToken) return;
+        try {
+          await server.notification({
             method: "notifications/progress",
             params: {
               progressToken,
@@ -438,36 +556,49 @@ class NotebookLMMCPServer {
             },
           });
           log.dim(`  📊 Progress: ${message}`);
+        } catch (error) {
+          log.warning(`  ⚠️  Progress notification failed (ignored): ${error}`);
         }
       };
 
       try {
-        const handler = this.toolDispatch.get(name);
+        const handler = toolDispatch.get(name);
         if (!handler) {
           log.error(`❌ [MCP] Unknown tool: ${name}`);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({ success: false, error: `Unknown tool: ${name}` }, null, 2),
-              },
-            ],
-          };
+          // Unknown method names are a protocol-level error, not a tool
+          // result: returning a success-shaped payload made a typo look like
+          // a tool that ran and failed.
+          throw new McpError(
+            ErrorCode.MethodNotFound,
+            `Unknown tool: ${name}. Call tools/list for the active set.`
+          );
         }
+
+        // A tool hidden by the active profile / `disabledTools` must not be
+        // callable: filtering only tools/list left every disabled tool fully
+        // invokable by name, so the profile setting was cosmetic.
+        if (!tool) {
+          log.error(`❌ [MCP] Tool disabled by profile: ${name}`);
+          throw new McpError(
+            ErrorCode.MethodNotFound,
+            `Tool "${name}" is not available in the active profile ` +
+              `("${this.settingsManager.getEffectiveSettings().profile}"). ` +
+              `Call tools/list for the active set.`
+          );
+        }
+
+        // The low-level Server does not validate arguments against
+        // inputSchema; without this a missing required argument reached the
+        // handler and surfaced as an internal TypeError (or, worse, was
+        // silently written to disk).
+        const validationError = validateToolArgs(tool, args);
+        if (validationError) {
+          log.error(`❌ [MCP] Invalid arguments for ${name}: ${validationError}`);
+          return failure(`Invalid arguments for \`${name}\`: ${validationError}`);
+        }
+
         const result = await handler(args, sendProgress);
 
-        // Tools whose result shape is stable and covered by a declared
-        // `outputSchema` (Task 10) — see each Tool definition for the
-        // matching schema. Kept narrow deliberately: attaching
-        // `structuredContent` to a tool whose result shape isn't pinned
-        // down risks silently drifting out of sync with its outputSchema.
-        const STRUCTURED_CONTENT_TOOLS = new Set([
-          "get_health",
-          "get_library_stats",
-          "list_sessions",
-          "get_studio_output_status",
-          "get_studio_output_content",
-        ]);
         // Never attach structuredContent to an error result — only the
         // success shape is covered by the declared outputSchema.
         const isSuccessResult =
@@ -483,39 +614,23 @@ class NotebookLMMCPServer {
               text: JSON.stringify(result, null, 2),
             },
           ],
-          ...(STRUCTURED_CONTENT_TOOLS.has(name) && isSuccessResult
+          ...(declaresOutputSchema && isSuccessResult
             ? { structuredContent: result as Record<string, unknown> }
             : {}),
-          // The SDK's client-side validator requires EITHER structuredContent
-          // present OR the result marked isError:true whenever the tool
-          // declares an outputSchema. Our failure results only encode
-          // failure inside the JSON text (success:false) and never set the
-          // protocol-level isError field, which trips
-          // "Tool X has an output schema but did not return structured
-          // content" in SDK-based clients. Scoped to the same 5
-          // outputSchema-declaring tools — not a blanket error-signalling
-          // change for the other 19 tools.
-          ...(STRUCTURED_CONTENT_TOOLS.has(name) && !isSuccessResult ? { isError: true } : {}),
+          ...(declaresOutputSchema && !isSuccessResult ? { isError: true } : {}),
         };
       } catch (error) {
+        // Protocol-level errors (unknown/disabled tool) must reach the client
+        // as JSON-RPC errors, not as a tool result.
+        if (error instanceof McpError) throw error;
+
         const errorMessage = error instanceof Error ? error.message : String(error);
         log.error(`❌ [MCP] Tool execution error: ${errorMessage}`);
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  success: false,
-                  error: errorMessage,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
+        // Same isError rule as above: an exception escaping a handler that
+        // declares an outputSchema previously produced a result SDK clients
+        // reject outright, hiding the real error message from the model.
+        return failure(errorMessage);
       }
     });
   }
@@ -546,9 +661,14 @@ class NotebookLMMCPServer {
       try {
         await this.toolHandlers.cleanup();
         await this.server.close();
+        // An HTTP transport keeps a listening socket that `server.close()`
+        // does not own; leaving it open kept the process alive past shutdown.
+        await this.httpHandle?.close();
         log.success("✅ Shutdown complete");
         clearTimeout(watchdog);
-        process.exit(0);
+        // A shutdown triggered by a crash must not report success to the
+        // supervisor that started us.
+        process.exit(this.shutdownFailed ? 1 : 0);
       } catch (error) {
         log.error(`❌ Error during shutdown: ${error}`);
         clearTimeout(watchdog);
@@ -566,14 +686,21 @@ class NotebookLMMCPServer {
     process.on("uncaughtException", (error) => {
       log.error(`💥 Uncaught exception: ${error}`);
       log.error(error.stack || "");
+      this.shutdownFailed = true;
       requestShutdown("uncaughtException");
     });
 
     process.on("unhandledRejection", (reason, promise) => {
       log.error(`💥 Unhandled rejection at: ${promise}`);
       log.error(`Reason: ${reason}`);
+      this.shutdownFailed = true;
       requestShutdown("unhandledRejection");
     });
+
+    // A stdio client that goes away never sends a signal — it just closes the
+    // pipe. Without this the process (and its Chrome) lived on as an orphan
+    // after every MCP client restart or /mcp reconnect (issue #29).
+    this.stdinShutdownHook = () => requestShutdown("stdin-closed");
   }
 
   /**
@@ -593,17 +720,25 @@ class NotebookLMMCPServer {
     log.info("");
 
     if (options.kind === "http") {
-      await startHttpTransport({
+      this.httpHandle = await startHttpTransport({
         port: options.port,
         host: options.host,
+        // One fresh Server per HTTP session: the SDK binds a Server to exactly
+        // one transport, so sharing this.server made every session after the
+        // first fail with "already connected" (returned to the client as 500).
         connect: async (transport) => {
-          await this.server.connect(transport);
+          const { server } = this.createConnection();
+          await server.connect(transport);
         },
       });
       log.success("✅ MCP Server connected via Streamable HTTP");
     } else {
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
+      // A stdio client that disconnects closes the pipe without a signal;
+      // without this the server and its Chrome outlive the client (issue #29).
+      process.stdin.on("close", () => this.stdinShutdownHook?.());
+      process.stdin.on("end", () => this.stdinShutdownHook?.());
       log.success("✅ MCP Server connected via stdio");
     }
 

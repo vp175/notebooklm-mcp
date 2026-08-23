@@ -44,6 +44,7 @@ import {
   triggerViaDialog,
   downloadViaSingleMenuItem,
 } from "./studio-outputs.js";
+import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 import type { DownloadAudioResult } from "./audio.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.videoOverviewButton;
@@ -51,8 +52,17 @@ const READY_SELECTORS = Selectors.studio.videoOverviewTile;
 const MORE_MENU_SELECTORS = Selectors.studio.videoOverviewMoreMenuButton;
 const DOWNLOAD_MENU_ITEM_SELECTORS = Selectors.studio.singleDownloadMenuItem;
 
-async function triggerVideoOverview(page: Page): Promise<void> {
-  await triggerViaDialog(page, TRIGGER_SELECTORS, "Video Overview entry");
+// `opts` must be declared and forwarded: the engine calls
+// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
+// `page` silently discards it — generation then runs over the whole
+// notebook while the tool reports success.
+async function triggerVideoOverview(
+  page: Page,
+  opts: StudioTriggerOptions
+): Promise<StudioTriggerOutcome> {
+  return triggerViaDialog(page, TRIGGER_SELECTORS, "Video Overview entry", {
+    customPrompt: opts.customPrompt,
+  });
 }
 
 async function downloadVideoOverview(page: Page, destDir: string): Promise<DownloadAudioResult> {
@@ -65,8 +75,9 @@ async function downloadVideoOverview(page: Page, destDir: string): Promise<Downl
   );
 }
 
+// Kind ("file") comes from FILE_KIND_TYPES via `studioKindOf` in the
+// engine, not from this object — see studio-outputs.ts.
 registerStudioStrategy("video", {
-  kind: "file",
   triggerSelectors: TRIGGER_SELECTORS,
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,

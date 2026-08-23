@@ -42,6 +42,49 @@ function followUpReminderEnabled(): boolean {
 }
 
 /**
+ * Per-call browser options are applied by mutating the process-global CONFIG,
+ * because the browser/session layer reads that singleton directly.
+ *
+ * The previous pattern — snapshot `{...CONFIG}` at the top of a handler and
+ * `Object.assign(CONFIG, snapshot)` in its `finally` — corrupted the config
+ * PERMANENTLY under concurrency: with two overlapping calls, the second one
+ * snapshots the first one's *mutated* config and restores that on the way out,
+ * so a `show_browser: true` call could leave the server headed for the rest of
+ * the process (or, with `stealth.enabled: false`, permanently unstealthed).
+ *
+ * Refcounting fixes the durable damage: the pristine config is captured once,
+ * when the first override starts, and restored once, when the last one ends —
+ * so CONFIG always converges back to the baseline. Overlapping calls with
+ * *conflicting* options still share one global while both are in flight (last
+ * writer wins for the overlap); that is inherent to a mutable singleton and is
+ * the reason these options are documented as per-call hints, not guarantees.
+ */
+let configOverrideDepth = 0;
+let pristineConfig: Partial<typeof CONFIG> | null = null;
+
+/** Token returned by {@link beginConfigOverride}; pass it to {@link endConfigOverride}. */
+type ConfigOverrideToken = { applied: boolean };
+
+function beginConfigOverride(effective?: typeof CONFIG): ConfigOverrideToken {
+  if (!effective) return { applied: false };
+  if (configOverrideDepth === 0) {
+    pristineConfig = { ...CONFIG };
+  }
+  configOverrideDepth++;
+  Object.assign(CONFIG, effective);
+  return { applied: true };
+}
+
+function endConfigOverride(token: ConfigOverrideToken): void {
+  if (!token.applied) return;
+  configOverrideDepth = Math.max(0, configOverrideDepth - 1);
+  if (configOverrideDepth === 0 && pristineConfig) {
+    Object.assign(CONFIG, pristineConfig);
+    pristineConfig = null;
+  }
+}
+
+/**
  * Result of an elicitation request, or `undefined` when the client never
  * declared the `elicitation` capability — callers must treat `undefined` the
  * same as `this.elicit` not existing at all, i.e. fall through to
@@ -129,7 +172,19 @@ export class ToolHandlers {
 
         resolvedNotebookUrl = notebook.url;
         log.info(`  Resolved notebook: ${notebook.name}`);
-      } else if (!resolvedNotebookUrl) {
+      } else if (!resolvedNotebookUrl && session_id) {
+        // A follow-up question in an existing session stays on THAT session's
+        // notebook. Falling through to the active notebook here silently
+        // destroyed the session and answered from different sources — see
+        // `resolveNotebookUrl` for the full note.
+        const existing = this.sessionManager.getSession(session_id);
+        if (existing) {
+          resolvedNotebookUrl = existing.notebookUrl;
+          log.info(`  Continuing session ${session_id} on its own notebook`);
+        }
+      }
+
+      if (!resolvedNotebookUrl) {
         const active = this.library.getActiveNotebook();
         if (active) {
           const notebook = this.library.incrementUseCount(active.id);
@@ -141,13 +196,19 @@ export class ToolHandlers {
         }
       }
 
+      // A session_id the server does not know is almost always a stale id from
+      // an earlier process or an expired session. Creating a fresh session
+      // silently (the old behaviour) looked like a successful follow-up while
+      // the conversational context was gone, so say so in the result.
+      const requestedSessionKnown = session_id
+        ? this.sessionManager.getSession(session_id) !== null
+        : true;
+
       // Progress: Getting or creating session
       await sendProgress?.("Getting or creating browser session...", 1, 5);
 
       // Apply browser options temporarily
-      const originalConfig = { ...CONFIG };
-      const effectiveConfig = applyBrowserOptions(browser_options, show_browser);
-      Object.assign(CONFIG, effectiveConfig);
+      const configToken = beginConfigOverride(applyBrowserOptions(browser_options, show_browser));
 
       // Calculate overrideHeadless parameter for session manager
       // show_browser takes precedence over browser_options.headless
@@ -171,12 +232,15 @@ export class ToolHandlers {
         // Progress: Asking question
         await sendProgress?.("Asking question to NotebookLM...", 2, 5);
 
-        // Ask the question (pass progress callback)
-        const rawAnswer = await session.ask(question, sendProgress);
-
-        // Extract citations from the same page session before any other call
-        // disturbs the source panel (issue #20).
-        const citationResult = await session.extractCitations(rawAnswer, source_format);
+        // Ask the question (pass progress callback). The session is marked
+        // busy for the whole answer+citation window: neither the idle sweeper
+        // nor max-sessions eviction may close this page mid-question.
+        const citationResult = await this.sessionManager.withSessionBusy(session, async () => {
+          const rawAnswer = await session.ask(question, sendProgress);
+          // Extract citations from the same page session before any other call
+          // disturbs the source panel (issue #20).
+          return session.extractCitations(rawAnswer, source_format);
+        });
         const baseAnswer = citationResult.formattedAnswer;
 
         const trimmed = baseAnswer.trimEnd();
@@ -202,6 +266,18 @@ export class ToolHandlers {
           _provenance: PROVENANCE,
           source_format,
           ...(citationResult.citations.length > 0 && { sources: citationResult.citations }),
+          // Say plainly when a requested citation format produced nothing, and
+          // when a supplied session_id did not name a live session — both used
+          // to be invisible in a success response.
+          ...(citationResult.note ? { sources_note: citationResult.note } : {}),
+          ...(requestedSessionKnown
+            ? {}
+            : {
+                session_note:
+                  `session_id "${session_id}" was not a live session on this server, ` +
+                  `so a NEW session (${session.sessionId}) answered this question — ` +
+                  `it carries no history from the earlier conversation.`,
+              }),
         };
 
         // Progress: Complete
@@ -214,7 +290,7 @@ export class ToolHandlers {
         };
       } finally {
         // Restore original CONFIG
-        Object.assign(CONFIG, originalConfig);
+        endConfigOverride(configToken);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -491,9 +567,7 @@ export class ToolHandlers {
     const startTime = Date.now();
 
     // Apply browser options temporarily
-    const originalConfig = { ...CONFIG };
-    const effectiveConfig = applyBrowserOptions(browser_options, show_browser);
-    Object.assign(CONFIG, effectiveConfig);
+    const configToken = beginConfigOverride(applyBrowserOptions(browser_options, show_browser));
 
     try {
       // Progress: Starting
@@ -503,6 +577,16 @@ export class ToolHandlers {
 
       // Progress: Opening browser
       await sendProgress?.("Opening browser window...", 2, 10);
+
+      // Close live sessions FIRST. `performSetup` deletes and relaunches the
+      // Chrome profile; doing that under a running shared context left the old
+      // browser holding a deleted profile directory — sessions that survived
+      // the wipe then failed in confusing ways and could keep a Chrome process
+      // alive against a profile that no longer exists.
+      if (this.sessionManager.getAllSessionsInfo().length > 0) {
+        log.warning("  🧹 Closing live sessions before re-authenticating...");
+        await this.sessionManager.closeAllSessions();
+      }
 
       // Perform setup with progress updates (uses CONFIG internally)
       const success = await this.authManager.performSetup(sendProgress);
@@ -540,7 +624,7 @@ export class ToolHandlers {
       };
     } finally {
       // Restore original CONFIG
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -579,9 +663,7 @@ export class ToolHandlers {
     const startTime = Date.now();
 
     // Apply browser options temporarily
-    const originalConfig = { ...CONFIG };
-    const effectiveConfig = applyBrowserOptions(browser_options, show_browser);
-    Object.assign(CONFIG, effectiveConfig);
+    const configToken = beginConfigOverride(applyBrowserOptions(browser_options, show_browser));
 
     try {
       // 1. Close all active sessions
@@ -633,7 +715,7 @@ export class ToolHandlers {
       };
     } finally {
       // Restore original CONFIG
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -975,6 +1057,23 @@ export class ToolHandlers {
   > {
     const { confirm, preserve_library = false } = args;
 
+    // Defence in depth. The protocol layer now validates arguments against the
+    // declared inputSchema, but this tool DELETES DATA IRREVERSIBLY: a truthy
+    // non-boolean (`"false"`, `1`, `[]`) reaching `if (!confirm)` would skip
+    // the preview and delete immediately, so re-check the type here rather
+    // than trusting a single upstream guard.
+    if (typeof confirm !== "boolean") {
+      return {
+        success: false,
+        error:
+          "`confirm` must be a boolean. Call cleanup_data with confirm:false first " +
+          "to preview exactly what would be deleted, then confirm:true to delete it.",
+      };
+    }
+    if (preserve_library !== undefined && typeof preserve_library !== "boolean") {
+      return { success: false, error: "`preserve_library` must be a boolean when provided." };
+    }
+
     log.info(`🔧 [TOOL] cleanup_data called`);
     log.info(`  Confirm: ${confirm}`);
     log.info(`  Preserve Library: ${preserve_library}`);
@@ -1001,8 +1100,23 @@ export class ToolHandlers {
           let confirmation: ElicitResult | undefined;
           try {
             confirmation = await this.elicit(
-              `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)} ` +
-                `(auth state, browser profile, and optionally the notebook library)? This cannot be undone.`,
+              // Name the categories that will actually be deleted rather than
+              // a vague summary — the previous wording ("auth state, browser
+              // profile, and optionally the notebook library") understated it,
+              // and a user cannot consent to what they are not told.
+              `Delete ${preview.totalPaths.length} item(s) totalling ${cleanupManager.formatBytes(preview.totalSizeBytes)}?\n` +
+                // Optional categories appear in the preview but are NOT
+                // deleted, so label them rather than implying consent to them.
+                `Categories: ${
+                  preview.categories
+                    .map((c) => (c.optional ? `${c.name} (listed only, not deleted)` : c.name))
+                    .join(", ") || "(none)"
+                }.\n` +
+                `You will have to sign in to NotebookLM again.` +
+                (preserve_library
+                  ? " The notebook library will be KEPT."
+                  : " The notebook library WILL be deleted.") +
+                `\nThis cannot be undone.`,
               {
                 type: "object",
                 properties: { confirmed: { type: "boolean" } },
@@ -1113,13 +1227,28 @@ export class ToolHandlers {
    */
   private async resolveNotebookUrl(
     notebookId?: string,
-    notebookUrl?: string
+    notebookUrl?: string,
+    sessionId?: string
   ): Promise<string | undefined> {
     if (notebookUrl) return notebookUrl;
     if (notebookId) {
       const nb = this.library.getNotebook(notebookId);
       if (!nb) throw new Error(`Notebook not found in library: ${notebookId}`);
       return nb.url;
+    }
+    // A live session's OWN notebook wins over the library's active notebook.
+    //
+    // Without this, `ask_question({ session_id })` with no explicit notebook
+    // resolved to whatever notebook happened to be active, and
+    // `getOrCreateSession` treats a different URL as "retarget this session":
+    // it CLOSED the caller's session and opened a new one on the other
+    // notebook. The follow-up question was then answered from the wrong
+    // sources with the conversation context gone — while still reporting
+    // success. Reproduced live: a follow-up asked in a session opened on
+    // "Income Tax Act, 2025" came back answered from "Direct Taxation Laws".
+    if (sessionId) {
+      const existing = this.sessionManager.getSession(sessionId);
+      if (existing) return existing.notebookUrl;
     }
     const active = this.library.getActiveNotebook();
     return active?.url;
@@ -1152,33 +1281,39 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AddSourceResult }>> {
+  }): Promise<ToolResult<{ result: AddSourceResult; session_id: string }>> {
     log.info(`🔧 [TOOL] add_source called (type=${args.type})`);
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      const effectiveConfig = applyBrowserOptions(undefined, args.show_browser);
-      Object.assign(CONFIG, effectiveConfig);
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.addSource({
-        type: args.type,
-        content: args.content,
-        title: args.title,
-      });
-      return { success: result.success, data: { result } };
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.addSource({
+          type: args.type,
+          content: args.content,
+          title: args.title,
+        })
+      );
+      return { success: result.success, data: { result, session_id: session.sessionId } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] add_source failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -1193,36 +1328,43 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] generate_audio called`);
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.generateAudio({
-        customPrompt: args.custom_prompt,
-        timeoutMs: args.timeout_ms,
-        waitForCompletion: args.wait_for_completion ?? false,
-      });
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.generateAudio({
+          customPrompt: args.custom_prompt,
+          timeoutMs: args.timeout_ms,
+          waitForCompletion: args.wait_for_completion ?? false,
+        })
+      );
       // `started` and `in_progress` count as success — the generation is on
       // its way; the caller polls `get_audio_status` for completion.
       const ok =
         result.status === "ready" || result.status === "started" || result.status === "in_progress";
-      return { success: ok, data: { result } };
+      return { success: ok, data: { result, session_id: session.sessionId } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] generate_audio failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -1234,28 +1376,41 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] get_audio_status called`);
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.getAudioStatus();
-      return { success: true, data: { result } };
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.getAudioStatus()
+      );
+      // A probe that itself failed is not a successful probe: returning
+      // success:true here hid engine errors (a missing Studio panel, a stale
+      // viewer) behind what looked like a clean "not_started" answer.
+      return {
+        success: result.status !== "error",
+        data: { result, session_id: session.sessionId },
+      };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] get_audio_status failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -1268,28 +1423,35 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: DownloadAudioResult }>> {
+  }): Promise<ToolResult<{ result: DownloadAudioResult; session_id: string }>> {
     log.info(`🔧 [TOOL] download_audio called`);
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.downloadAudio(args.destination_dir);
-      return { success: result.success, data: { result } };
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.downloadAudio(args.destination_dir)
+      );
+      return { success: result.success, data: { result, session_id: session.sessionId } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] download_audio failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -1307,40 +1469,47 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] generate_studio_output called (type=${args.output_type})`);
     if (!isStudioTypeImplemented(args.output_type)) {
       const error = this.studioTypeNotImplementedError(args.output_type);
       log.error(`❌ [TOOL] generate_studio_output failed: ${error}`);
       return { success: false, error };
     }
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.generateStudioOutput(args.output_type, {
-        customPrompt: args.custom_prompt,
-        difficulty: args.difficulty,
-        timeoutMs: args.timeout_ms,
-        waitForCompletion: args.wait_for_completion ?? false,
-      });
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.generateStudioOutput(args.output_type, {
+          customPrompt: args.custom_prompt,
+          difficulty: args.difficulty,
+          timeoutMs: args.timeout_ms,
+          waitForCompletion: args.wait_for_completion ?? false,
+        })
+      );
       const ok =
         result.status === "ready" || result.status === "started" || result.status === "in_progress";
-      return { success: ok, data: { result } };
+      return { success: ok, data: { result, session_id: session.sessionId } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] generate_studio_output failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -1354,33 +1523,44 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult }>> {
+  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] get_studio_output_status called (type=${args.output_type})`);
     if (!isStudioTypeImplemented(args.output_type)) {
       const error = this.studioTypeNotImplementedError(args.output_type);
       log.error(`❌ [TOOL] get_studio_output_status failed: ${error}`);
       return { success: false, error };
     }
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.getStudioOutputStatus(args.output_type);
-      return { success: true, data: { result } };
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.getStudioOutputStatus(args.output_type)
+      );
+      // Same rule as get_audio_status: an errored probe must not report success.
+      return {
+        success: result.status !== "error",
+        data: { result, session_id: session.sessionId },
+      };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] get_studio_output_status failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -1395,33 +1575,40 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: DownloadAudioResult }>> {
+  }): Promise<ToolResult<{ result: DownloadAudioResult; session_id: string }>> {
     log.info(`🔧 [TOOL] download_studio_output called (type=${args.output_type})`);
     if (!isStudioTypeImplemented(args.output_type)) {
       const error = this.studioTypeNotImplementedError(args.output_type);
       log.error(`❌ [TOOL] download_studio_output failed: ${error}`);
       return { success: false, error };
     }
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.downloadStudioOutput(args.output_type, args.destination_dir);
-      return { success: result.success, data: { result } };
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.downloadStudioOutput(args.output_type, args.destination_dir)
+      );
+      return { success: result.success, data: { result, session_id: session.sessionId } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] download_studio_output failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 
@@ -1435,33 +1622,45 @@ export class ToolHandlers {
     notebook_id?: string;
     notebook_url?: string;
     show_browser?: boolean;
-  }): Promise<ToolResult<{ result: { success: boolean; content?: unknown; message?: string } }>> {
+  }): Promise<
+    ToolResult<{
+      result: { success: boolean; content?: unknown; message?: string };
+      session_id: string;
+    }>
+  > {
     log.info(`🔧 [TOOL] get_studio_output_content called (type=${args.output_type})`);
     if (!isStudioTypeImplemented(args.output_type)) {
       const error = this.studioTypeNotImplementedError(args.output_type);
       log.error(`❌ [TOOL] get_studio_output_content failed: ${error}`);
       return { success: false, error };
     }
-    const originalConfig = { ...CONFIG };
-    if (args.show_browser !== undefined) {
-      Object.assign(CONFIG, applyBrowserOptions(undefined, args.show_browser));
-    }
+    const configToken = beginConfigOverride(
+      args.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, args.show_browser)
+    );
     const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
     try {
-      const url = await this.resolveNotebookUrl(args.notebook_id, args.notebook_url);
+      const url = await this.resolveNotebookUrl(
+        args.notebook_id,
+        args.notebook_url,
+        args.session_id
+      );
       const session = await this.sessionManager.getOrCreateSession(
         args.session_id,
         url,
         overrideHeadless
       );
-      const result = await session.getStudioOutputContent(args.output_type);
-      return { success: result.success, data: { result } };
+      const result = await this.sessionManager.withSessionBusy(session, () =>
+        session.getStudioOutputContent(args.output_type)
+      );
+      return { success: result.success, data: { result, session_id: session.sessionId } };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       log.error(`❌ [TOOL] get_studio_output_content failed: ${msg}`);
       return { success: false, error: msg };
     } finally {
-      Object.assign(CONFIG, originalConfig);
+      endConfigOverride(configToken);
     }
   }
 

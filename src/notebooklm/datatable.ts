@@ -31,12 +31,22 @@ import {
   triggerViaDialog,
   openStructuredViewer,
 } from "./studio-outputs.js";
+import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.dataTableButton;
 const READY_SELECTORS = Selectors.studio.dataTableTile;
 
-async function triggerDataTable(page: Page): Promise<void> {
-  await triggerViaDialog(page, TRIGGER_SELECTORS, "Data Table entry");
+// `opts` must be declared and forwarded: the engine calls
+// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
+// `page` silently discards it — the Data Table would be generated over the
+// whole notebook while the tool reports success.
+async function triggerDataTable(
+  page: Page,
+  opts: StudioTriggerOptions
+): Promise<StudioTriggerOutcome> {
+  return triggerViaDialog(page, TRIGGER_SELECTORS, "Data Table entry", {
+    customPrompt: opts.customPrompt,
+  });
 }
 
 export interface DataTableContent {
@@ -55,7 +65,10 @@ async function extractDataTable(page: Page): Promise<DataTableContent> {
   // stale, unclosed viewer left open by an earlier call in the same
   // reused session. `page.locator("table").first()` above would silently
   // pick whichever one happens to come first in DOM order; refuse rather
-  // than guess if more than one is present.
+  // than guess if more than one is present. (The engine now closes viewers
+  // after every extraction AND before every Studio operation, so this
+  // should no longer fire in practice — it stays as the honest backstop
+  // that caught the leak in the first place.)
   const tableCount = await page.locator("table").count();
   if (tableCount > 1) {
     throw new Error(
@@ -75,11 +88,14 @@ async function extractDataTable(page: Page): Promise<DataTableContent> {
   });
 }
 
+// Kind ("structured") comes from STRUCTURED_KIND_TYPES via `studioKindOf`
+// in the engine, not from this object — see studio-outputs.ts.
 registerStudioStrategy("datatable", {
-  kind: "structured",
   triggerSelectors: TRIGGER_SELECTORS,
   // No in-progress DOM/text was observed live this session (mirrors the
-  // same empty-array convention used by video-overview.ts/slides.ts).
+  // same empty-array convention used by video-overview.ts/slides.ts). An
+  // empty list means the engine has no DOM signal for this type at all —
+  // repeat-call protection comes from its in-flight record instead.
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,
   trigger: triggerDataTable,

@@ -36,6 +36,11 @@ const PROFILES: Record<ProfileName, string[]> = {
     "list_notebooks",
     "select_notebook",
     "get_notebook", // Added as it is read-only and useful
+    // `setup_auth` is not optional in any profile: without it an
+    // unauthenticated user has NO way to authenticate, and every other tool in
+    // this profile fails until they do. `get_health` even tells them to call
+    // it — a tool the profile used to hide.
+    "setup_auth",
   ],
   standard: [
     "ask_question",
@@ -78,7 +83,25 @@ export class SettingsManager {
         // Synchronous read keeps the constructor simple — settings are tiny
         // and we need them before any tool dispatch can happen.
         const data = readFileSync(this.settingsPath, "utf-8");
-        return { ...DEFAULT_SETTINGS, ...JSON.parse(data) };
+        const parsed = JSON.parse(data) as Partial<Settings>;
+        const merged: Settings = { ...DEFAULT_SETTINGS, ...parsed };
+
+        // A typo'd profile ("standrd") used to reach `PROFILES[profile]` as
+        // `undefined` and crash the whole server on the first tools/list with
+        // a bare "Cannot read properties of undefined (reading 'includes')".
+        // Fall back to the default and say what happened.
+        if (!isProfileName(merged.profile)) {
+          log.warning(
+            `⚠️  Unknown profile "${String(merged.profile)}" in ${this.settingsPath} — ` +
+              `using "${DEFAULT_SETTINGS.profile}". Valid profiles: minimal, standard, full.`
+          );
+          merged.profile = DEFAULT_SETTINGS.profile;
+        }
+        if (!Array.isArray(merged.disabledTools)) {
+          log.warning(`⚠️  \`disabledTools\` must be an array — ignoring it.`);
+          merged.disabledTools = [];
+        }
+        return merged;
       }
     } catch (error) {
       log.warning(`⚠️  Failed to load settings: ${error}. Using defaults.`);
@@ -126,7 +149,9 @@ export class SettingsManager {
    */
   filterTools(allTools: Tool[]): Tool[] {
     const { profile, disabledTools } = this.getEffectiveSettings();
-    const allowedTools = PROFILES[profile];
+    // Defensive: an unknown profile is already normalised at load time, but a
+    // caller could still hand us one — never index into PROFILES blindly.
+    const allowedTools = PROFILES[profile] ?? PROFILES[DEFAULT_SETTINGS.profile];
 
     return allTools.filter((tool) => {
       // 1. Check if allowed by profile (unless profile is full/wildcard)

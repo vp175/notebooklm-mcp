@@ -481,9 +481,23 @@ export const Selectors = {
      * sources"/Delete. `slides.ts` defaults to the PDF item.
      */
     slidesMoreMenuButton: studioMoreMenuSelectors(STUDIO_TILE_ICON_LIGATURES.slides),
-    /** Slide Deck's PDF download menu item (the format this server uses). */
+    /**
+     * Slide Deck's PDF download menu item (the format this server uses).
+     * Ordered — consumed by `clickFirstVisible`, so position is priority.
+     *
+     * LOCALE RISK, unresolved: the icon-ligature candidate (`drive_pdf`) is
+     * the only locale-independent entry and it has NOT been live-verified
+     * (unlike `save_alt` on the single-download menus, which was). The
+     * middle candidate matches the "(.pdf)" file-extension token recorded
+     * in the live menu text "Download PDF Document (.pdf)" — derived from
+     * that recorded observation, not verified separately, but a file
+     * extension is far likelier to survive localisation than the word
+     * "Download". The English text stays LAST, per this file's
+     * anchor-priority convention.
+     */
     slidesDownloadPdfMenuItem: [
       `[role="menuitem"]:has(mat-icon:text-is("drive_pdf"))`,
+      `[role="menuitem"]:has-text("(.pdf)")`,
       `[role="menuitem"]:has-text("Download PDF")`,
     ],
     /**
@@ -534,6 +548,51 @@ export const Selectors = {
     quizTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.quiz),
     mindmapButton: studioTriggerSelectors(STUDIO_TILE_ICON_LIGATURES.mindmap, "Mind Map"),
     mindmapTile: studioReadyTileSelectors(STUDIO_TILE_ICON_LIGATURES.mindmap),
+    /**
+     * Controls that CLOSE an open structured-content viewer (Mind Map /
+     * Flashcards / Quiz / Data Table). Ordered — consumed by
+     * `closeStructuredViewer` (studio-outputs.ts) as a loop, so position is
+     * priority, and every attempt is verified against
+     * `viewerOpenIndicator` below before being believed.
+     *
+     * Source: live DOM recon 2026-08-23 of the viewer chrome, which
+     * exposes `button[aria-label="Close web page viewer"]` and a `mat-icon`
+     * ligature `collapse_content` (alongside `expand_content`, `share`,
+     * `more_vert`); a generic `button[aria-label*="close" i]` also matched.
+     * Nothing here is invented. Order follows this file's anchor-priority
+     * convention as far as the recon allows: the exact aria-label first
+     * (most specific), then the locale-independent ligature, then the
+     * generic aria-label last.
+     *
+     * LOCALE RISK: both aria-label entries are English-only; the
+     * `collapse_content` ligature is what carries other locales, and
+     * `closeStructuredViewer` falls back to `page.keyboard.press("Escape")`
+     * — selector-free and locale-free — when every candidate fails.
+     */
+    viewerCloseButton: [
+      'button[aria-label="Close web page viewer"]',
+      'button:has(mat-icon:text-is("collapse_content"))',
+      'button[aria-label*="close" i]',
+    ],
+    /**
+     * Presence test for "a structured-content viewer is currently open",
+     * used both as the start-of-operation leak check and to verify that a
+     * close attempt actually worked.
+     *
+     * Deliberately NARROWER than `viewerCloseButton` above: the generic
+     * `button[aria-label*="close" i]` is excluded because any Material
+     * dialog or menu carries one, and `share`/`more_vert` (also present in
+     * the viewer chrome per the same recon) are excluded because every
+     * completed artifact tile carries `more_vert` too. A false positive
+     * here would make every Studio call press Escape against the ordinary
+     * notebook view. `collapse_content`/`expand_content` are the viewer
+     * chrome's own expand/collapse pair and are locale-independent.
+     */
+    viewerOpenIndicator: [
+      'button[aria-label="Close web page viewer"]',
+      'button:has(mat-icon:text-is("collapse_content"))',
+      'button:has(mat-icon:text-is("expand_content"))',
+    ],
   },
 
   notebooks: {

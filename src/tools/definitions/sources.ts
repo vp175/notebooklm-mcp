@@ -105,17 +105,15 @@ export const generateAudioTool: Tool = {
     "  2. Poll `get_audio_status` every ~30 s\n" +
     "  3. When status is `ready`, call `download_audio`\n\n" +
     "Pass `wait_for_completion: true` for legacy synchronous behaviour " +
-    "(blocks for up to `timeout_ms`). Audio Overview is the only Studio " +
-    "output exposed in v2.0 (Video / Mindmap / Quiz / Infographic / " +
-    "Datatable / Presentation are NotebookLM features but not yet wrapped).\n\n" +
+    "(blocks for up to `timeout_ms`).\n\n" +
     'Equivalent to `generate_studio_output` with `output_type: "audio"` — ' +
-    "kept as a dedicated tool for backward compatibility. The other 8 " +
-    "Studio output types (video, report, slides, infographic, mindmap, " +
-    "datatable, quiz, flashcards) are recognised by the generic " +
+    "kept as a dedicated tool for backward compatibility. Eight of the nine " +
+    "Studio output types are implemented and reachable through the generic " +
     "`generate_studio_output` / `get_studio_output_status` / " +
-    "`download_studio_output` / `get_studio_output_content` tools' schemas, " +
-    "but none are implemented yet — calling any of them returns a clear " +
-    '"not yet implemented" error (Phase 2).',
+    "`download_studio_output` / `get_studio_output_content` tools: audio, " +
+    "video, infographic and slides (file-kind, downloaded to disk); mindmap, " +
+    "datatable, quiz and flashcards (structured-kind, returned as JSON). " +
+    'Only `report` returns a clear "not yet implemented" error.',
   inputSchema: {
     type: "object",
     properties: {
@@ -162,15 +160,18 @@ export const getAudioStatusTool: Tool = {
     "Returned `status` values:\n" +
     "  • `ready` — Audio Overview is generated and ready to download\n" +
     "  • `in_progress` — generation is currently running\n" +
-    "  • `not_started` — no Audio Overview exists yet for this notebook\n\n" +
+    "  • `not_started` — no COMPLETED Audio Overview was found. This is " +
+    "ALSO what you get while a generation is running but its tile has not " +
+    "appeared yet, so never read `not_started` as proof that nothing is " +
+    "being generated: if you just called `generate_audio`, keep polling " +
+    "rather than triggering a second generation.\n\n" +
     "Safe to poll every ~30 s while waiting for `generate_audio` to finish. " +
     "When status flips to `ready`, call `download_audio` with a destination " +
     "directory.\n\n" +
     'Equivalent to `get_studio_output_status` with `output_type: "audio"` ' +
     "— kept as a dedicated tool for backward compatibility. The generic " +
-    "`get_studio_output_status` tool accepts the other 8 Studio output " +
-    "types by schema, but none are implemented yet — calling it with any " +
-    'of them returns a clear "not yet implemented" error (Phase 2).',
+    "`get_studio_output_status` tool serves every implemented type " +
+    "(all except `report`).",
   inputSchema: {
     type: "object",
     properties: {
@@ -199,11 +200,10 @@ export const downloadAudioTool: Tool = {
     "filename (sanitised — usually the audio's title with underscores). " +
     "The full saved path is returned in `result.filePath`.\n\n" +
     'Equivalent to `download_studio_output` with `output_type: "audio"` — ' +
-    "kept as a dedicated tool for backward compatibility. The other " +
-    "file-kind Studio output types (video, report, slides, infographic) " +
-    "are recognised by the generic `download_studio_output` tool's " +
-    "schema, but none are implemented yet — calling it with any of them " +
-    'returns a clear "not yet implemented" error (Phase 2).',
+    "kept as a dedicated tool for backward compatibility. The generic " +
+    "`download_studio_output` tool also serves the other implemented " +
+    "file-kind types (video, slides, infographic); `report` is not " +
+    "implemented.",
   inputSchema: {
     type: "object",
     properties: {
@@ -211,9 +211,13 @@ export const downloadAudioTool: Tool = {
         type: "string",
         description:
           "Absolute directory path where the file is saved (created if " +
-          "missing). Example: `/Users/jane/Downloads/notebooklm` or " +
-          "`/tmp/audio`. Relative paths are NOT recommended — the server " +
-          "may run from a different working directory than the caller.",
+          "missing). Example: `C:/Users/jane/Downloads/notebooklm` or " +
+          "`/tmp/audio`. A RELATIVE path is REJECTED with an error — the " +
+          "server's working directory is not the caller's, so a relative " +
+          "path would silently drop the file somewhere unexpected. If a " +
+          "file of the same name already exists it is NOT overwritten; the " +
+          "download is saved alongside it as `name (2).ext` and the path " +
+          "actually written is returned in `result.filePath`.",
       },
       show_browser: {
         type: "boolean",
