@@ -159,7 +159,7 @@ export const downloadStudioOutputTool: Tool = {
   name: "download_studio_output",
   description:
     "Save a completed file-kind Studio output to disk. Only valid for " +
-    "output_type in [audio, video, report, slides, infographic] — for " +
+    "output_type in [audio, video, slides, infographic] — for " +
     "mindmap/datatable/quiz/flashcards use get_studio_output_content instead. " +
     "Precondition: get_studio_output_status must report `ready`.",
   inputSchema: {
@@ -201,7 +201,7 @@ export const getStudioOutputContentTool: Tool = {
   description:
     "Extract a completed structured-kind Studio output as JSON. Only valid " +
     "for output_type in [mindmap, datatable, quiz, flashcards] — for audio/" +
-    "video/report/slides/infographic use download_studio_output instead. " +
+    "video/slides/infographic use download_studio_output instead. " +
     "Precondition: get_studio_output_status must report `ready`.",
   inputSchema: {
     type: "object",

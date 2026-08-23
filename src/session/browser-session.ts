@@ -469,8 +469,9 @@ export class BrowserSession {
       await randomDelay(1000, 1500);
 
       // Wait for the response with streaming-stability detection (issue #43).
-      // Timeout comes from CONFIG.answerTimeoutMs so users can tune it via
-      // ANSWER_TIMEOUT_MS or browser_options.timeout_ms (issue #14, #27).
+      // Timeout comes from CONFIG.answerTimeoutMs, which only the
+      // ANSWER_TIMEOUT_MS env var sets — `browser_options.timeout_ms` maps to
+      // the per-action browserTimeout and does NOT extend this wait.
       log.info(`  ⏳ Waiting for response (streaming-stability)...`);
       await sendProgress?.("Waiting for NotebookLM response (streaming-stability)...", 3, 5);
       const answer = await waitForStableAnswer(page, {

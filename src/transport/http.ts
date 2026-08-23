@@ -3,10 +3,17 @@
  *
  * Hosts the MCP protocol over HTTP using the SDK's
  * `StreamableHTTPServerTransport`. Built on Node's stdlib `http` module so we
- * don't pull in Express just to forward requests. Two operations:
+ * don't pull in Express just to forward requests. Routes:
  *
  *   POST /mcp        — JSON-RPC requests/responses
- *   GET  /healthz    — liveness probe (200 OK with version)
+ *   GET  /healthz    — liveness probe
+ *   GET  /mcp        — SSE stream for an established session
+ *   DELETE /mcp      — terminate a session
+ *
+ * SECURITY: this transport has NO authentication and performs NO Host or
+ * Origin validation. Bind it to localhost, or put it behind a proxy that
+ * authenticates — anything that can reach the port can drive the signed-in
+ * browser.
  *
  * Multiple sessions are supported via the `Mcp-Session-Id` header — each
  * session keeps its own transport so concurrent clients don't tread on each

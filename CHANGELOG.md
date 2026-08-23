@@ -5,6 +5,150 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Fork of upstream v2.0.0. A multi-agent review pass over the whole server, plus
+the generic Studio-output engine. Not published to npm — the `notebooklm-mcp`
+package on npm is upstream and contains none of this.
+
+### Added
+
+- **Generic Studio-output tools**: `generate_studio_output`,
+  `get_studio_output_status`, `download_studio_output`,
+  `get_studio_output_content` cover all 9 `StudioOutputType` values by schema.
+  Eight are backed by live-verified strategies — `audio`, `video`,
+  `infographic`, `slides` (file kinds) and `mindmap`, `datatable`, `quiz`,
+  `flashcards` (structured kinds). Only `report` returns a clear "not yet
+  implemented (Phase 2)" error. `generate_audio` / `get_audio_status` /
+  `download_audio` remain backward-compatible aliases for `output_type:
+  "audio"`.
+- **`discover_notebooks`**: registers every notebook on the account's
+  dashboard, including ones created in the web UI that `add_notebook` can
+  never see because it only stores the URL it is handed. Dedupes by notebook
+  UUID, so re-running is safe.
+- **Argument validation against each tool's `inputSchema`** before dispatch.
+  The low-level `Server` does not validate, so every published `required`
+  array was advisory: `add_notebook` accepted a call with no
+  `description`/`topics` and wrote a half-empty library entry, and
+  `get_studio_output_status` read `args.output_type` outside its own
+  try/catch and surfaced a raw `TypeError`. Unknown extra properties are
+  still tolerated.
+- **`data.session_id` on every browser-touching tool** (`add_source`, the
+  three audio tools, the four Studio tools). These create a session when none
+  is passed; it was previously invisible to the caller and leaked until the
+  idle timeout. Callers can now `close_session` it or reuse it.
+- **`sources_note` and `session_note` on `ask_question`** — a requested
+  citation format that produced nothing, and a supplied `session_id` that was
+  not a live session (so a new session answered, carrying no prior context).
+  Both cases used to be silent.
+- **The two prompts the server advertised**, `notebooklm.auth-setup` and
+  `notebooklm.auth-repair`. The `prompts: {}` capability was declared and tool
+  descriptions pointed at them, but no `ListPromptsRequestSchema` /
+  `GetPromptRequestSchema` handler was ever registered, so calling either
+  failed.
+- **`structuredContent` / `outputSchema`** on tool results that declare an
+  output schema, with `isError` set correctly on failure.
+
+### Changed
+
+- **Profile filtering applies to `tools/call`, not only `tools/list`.** Tools
+  hidden by the active profile or by `disabled-tools` stayed fully callable by
+  name, which made the setting cosmetic. Both a hidden and an unknown tool name
+  now return a JSON-RPC `MethodNotFound` error rather than a success-shaped
+  failure payload. `setup_auth` is in every profile, including `minimal` —
+  without it an unauthenticated user cannot authenticate at all.
+- **`setup_auth` is annotated `destructiveHint: true`** and documented as
+  blocking (up to 10 minutes). It closes live sessions and replaces the Chrome
+  profile; `destructiveHint: false` told hosts that gate destructive tools the
+  opposite of the truth.
+- **`cleanup_data` deletion is confined to an allow-list** of this server's own
+  directories, checked both at enumeration and again immediately before each
+  recursive delete. It no longer touches the MCP client's project/session
+  directories (`~/.claude/projects/*` — irreplaceable transcripts whose
+  directory names matched the old `*notebooklm-mcp*` glob) or the OS Trash
+  (unrecoverable, and not this server's data). Categories flagged `optional`
+  are skipped unless explicitly requested; they previously logged a warning and
+  deleted anyway, so opting out was impossible.
+- **`report` is classified honestly** as neither a file nor a structured kind.
+  It was listed as a file kind; its menu offers "Export to Docs"/"Export to
+  Sheets" with no browser download at all.
+- **Declared MCP capabilities corrected**: dropped the invalid
+  `resourceTemplates` sibling key (resource templates belong to the `resources`
+  capability per spec), dropped the unbacked `logging` declaration, and added
+  `resources: { listChanged: true }` with `resources/list_changed` sent only on
+  a genuine list change — a notebook added, removed, or renamed — rather than on
+  every library write, including the `use_count` bump on every `ask_question`.
+- **Tool dispatch** moved from a large switch statement to a handler map, with
+  a shared `withRecovery()` helper in `BrowserSession` behind `ask_question`,
+  `reset_session`, and every audio/Studio call.
+- **Documentation** rewritten against the code: real return shapes for every
+  tool, the true tool count (25), a consistent account of Studio-output status,
+  `notebook.google.com` as the current domain (legacy host noted as accepted),
+  the full HTTP route list with its lack of authentication stated plainly, and a
+  prominent note that the published npm package is upstream and does not contain
+  this fork's work.
+
+### Fixed
+
+- **Audio generation actually starts.** The trigger tile always opens a
+  "Customize Audio Overview" dialog; the bare click stopped there, so
+  generation had likely never started via this server despite the tool
+  reporting `status: "started"`.
+- **Downloads actually land.** Clicking "Download" opens a new popup page and
+  the browser `download` event fires there, not on the original page — the old
+  code listened on the wrong page and timed out after 60 s even though the click
+  had succeeded.
+- **A follow-up question stays on its own session's notebook.**
+  `ask_question({ session_id })` with no explicit notebook resolved to whatever
+  notebook was active, and a differing URL makes `getOrCreateSession` retarget:
+  it closed the caller's session and answered from different sources while still
+  reporting success. Reproduced live across two notebooks.
+- **A stale `session_id` is no longer hidden.** Creating a fresh session
+  silently looked like a successful follow-up with the conversational context
+  gone.
+- **An errored status probe reports failure.** `get_audio_status` /
+  `get_studio_output_status` returned `success: true` for an engine error,
+  hiding a missing Studio panel or a stale viewer behind what looked like a
+  clean `not_started`.
+- **Citation markers are polled for.** They mount a beat after the answer text
+  settles, so a single read taken the moment the text stabilised found nothing
+  and reported "no sources" for answers that plainly had them.
+- **Structured-kind extraction signals partial reads** instead of returning
+  silently-wrong data: an `incomplete` marker on a mindmap node whose captured
+  children fall short of its declared count, `missingPositions` on quiz and
+  flashcards. Quiz options are read from the DOM, never clicked — clicking an
+  answer would record it server-side.
+- **The HTTP transport supports concurrent sessions.** The SDK binds a `Server`
+  to exactly one transport, so sharing one instance made the second concurrent
+  client fail with "already connected" and receive a 500. Each session now gets
+  its own `Server`; the managers stay shared.
+- **Progress notifications fire.** The progress token was read from
+  `arguments._meta.progressToken`, which no compliant client populates — a live
+  run recorded zero notifications across a 26-second `ask_question`. It is read
+  from `params._meta` now, with the old location kept as a fallback.
+- **Per-call browser options can no longer corrupt the global config
+  permanently.** The snapshot/restore pattern let one overlapping call restore
+  another's mutated config, so a single `show_browser: true` could leave the
+  server headed — or, with stealth disabled, permanently unstealthed — for the
+  rest of the process.
+- **A stdio client disconnect shuts the server down.** A client that goes away
+  closes the pipe without sending a signal, so the server and its Chrome
+  survived as orphans after every client restart or `/mcp` reconnect.
+- **A caller-supplied `timeout_ms` of `0` no longer pins a session forever.**
+  It was passed straight into `locator.waitFor({ timeout: 0 })`, which
+  Playwright reads as "no timeout at all". Zero, negatives, `NaN`, `Infinity`
+  and non-numbers all mean "use the default" now, and any value is capped at
+  30 minutes.
+- **A malformed `library.json` is quarantined** rather than silently replaced,
+  unknown top-level keys round-trip, and notebooks dedupe by the UUID parsed
+  from the URL — so the same notebook cannot register twice under two hosts or
+  with different query strings.
+- **A typo'd profile in `settings.json`** falls back to `full` with a warning
+  instead of crashing the first `tools/list` with "Cannot read properties of
+  undefined".
+- **`package.json`'s `files` array** no longer lists `NOTEBOOKLM_USAGE.md`,
+  which does not exist in the repository.
+
 ## [2.0.0] - 2026-04-30
 
 Major release that closes the issue backlog and replaces the brittle parts of
