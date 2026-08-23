@@ -29,12 +29,23 @@ export class SessionManager {
   private sessionTimeout: number;
   private cleanupInterval?: NodeJS.Timeout;
   /**
-   * Sessions currently executing a tool operation. The idle sweeper and the
-   * max-sessions eviction both skip these: `lastActivity` does not advance
-   * during a long operation, so without this a session gets closed underneath
-   * the request that is using it.
+   * Sessions currently executing a tool operation, REFCOUNTED. The idle
+   * sweeper and the max-sessions eviction both skip these: `lastActivity` does
+   * not advance during a long operation, so without this a session gets closed
+   * underneath the request that is using it.
+   *
+   * A plain Set was wrong: with two overlapping operations on one session (a
+   * client issuing parallel tool calls, or two HTTP exchanges), the FIRST to
+   * finish deleted the entry while the second was still running, and the
+   * sweeper could then close the page mid-operation. The count only reaches
+   * zero when the last operation returns.
    */
-  private busySessions: Set<string> = new Set();
+  private busySessions: Map<string, number> = new Map();
+
+  /** True while at least one operation holds this session. */
+  private isBusy(sessionId: string): boolean {
+    return (this.busySessions.get(sessionId) ?? 0) > 0;
+  }
 
   constructor(authManager: AuthManager) {
     this.authManager = authManager;
@@ -139,6 +150,15 @@ export class SessionManager {
       // silently destroyed the session to "retarget" it at itself.
       const sessionCanonical = parseNotebookUrl(session.notebookUrl)?.url ?? session.notebookUrl;
       if (sessionCanonical !== targetUrl) {
+        // Retargeting closes the page. Refuse while another call is using it —
+        // silently closing a busy session fails that call with an unexplained
+        // "Target closed".
+        if (this.isBusy(sessionId)) {
+          throw new Error(
+            `Session ${sessionId} is busy with another operation and is open on a different ` +
+              `notebook. Wait for it to finish, or omit session_id to work in a new session.`
+          );
+        }
         log.warning(`♻️  Replacing session ${sessionId} with new notebook URL`);
         await session.close();
         this.sessions.delete(sessionId);
@@ -204,11 +224,13 @@ export class SessionManager {
    */
   async withSessionBusy<T>(session: BrowserSession, fn: () => Promise<T>): Promise<T> {
     const id = session.sessionId;
-    this.busySessions.add(id);
+    this.busySessions.set(id, (this.busySessions.get(id) ?? 0) + 1);
     try {
       return await fn();
     } finally {
-      this.busySessions.delete(id);
+      const remaining = (this.busySessions.get(id) ?? 1) - 1;
+      if (remaining > 0) this.busySessions.set(id, remaining);
+      else this.busySessions.delete(id);
       try {
         session.updateActivity();
       } catch {
@@ -276,7 +298,7 @@ export class SessionManager {
       // expansion) looks idle to this sweeper the whole time it runs. Closing
       // a busy session pulls the page out from under the operation, which
       // surfaces to the caller as an unexplained "Target closed".
-      if (this.busySessions.has(sessionId)) {
+      if (this.isBusy(sessionId)) {
         continue;
       }
       if (session.isExpired(this.sessionTimeout)) {
@@ -329,7 +351,7 @@ export class SessionManager {
     let oldestTime = Infinity;
 
     for (const [sessionId, session] of this.sessions.entries()) {
-      if (this.busySessions.has(sessionId)) continue;
+      if (this.isBusy(sessionId)) continue;
       if (session.createdAt < oldestTime) {
         oldestTime = session.createdAt;
         oldestId = sessionId;

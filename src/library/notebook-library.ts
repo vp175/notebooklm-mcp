@@ -194,8 +194,21 @@ export class NotebookLibrary {
   private saveBlockedReason: string | null = null;
 
   /** Register a callback fired after every successful library mutation. */
-  onChange(cb: () => void): void {
+  /**
+   * Subscribe to library changes. Returns an UNSUBSCRIBE function — callers
+   * whose lifetime is shorter than the library's must call it.
+   *
+   * Without one, the HTTP transport (which builds a fresh server instance per
+   * exchange) added a listener per request to this long-lived object: every
+   * dead server stayed reachable forever and every later mutation tried to
+   * notify all of them.
+   */
+  onChange(cb: () => void): () => void {
     this.changeListeners.push(cb);
+    return () => {
+      const i = this.changeListeners.indexOf(cb);
+      if (i >= 0) this.changeListeners.splice(i, 1);
+    };
   }
 
   private notifyChanged(): void {
@@ -437,6 +450,16 @@ export class NotebookLibrary {
     const deadline = Date.now() + LOCK_WAIT_MS;
 
     for (;;) {
+      // Deadline FIRST. Two of the paths below used to `continue` without
+      // checking it and without sleeping: a stale lock that cannot be unlinked
+      // (antivirus, or another process holding the handle without delete
+      // sharing) turned this into a tight synchronous spin that wedged the
+      // whole server inside a library mutation. Every path now converges here.
+      if (Date.now() >= deadline) {
+        log.warning("  ⚠️  library.lock still held — proceeding unlocked (merge still applies)");
+        return null;
+      }
+
       try {
         return fs.openSync(this.lockPath, "wx");
       } catch (error) {
@@ -446,6 +469,7 @@ export class NotebookLibrary {
           return null;
         }
 
+        let removedStale = false;
         try {
           const ageMs = Date.now() - fs.statSync(this.lockPath).mtimeMs;
           if (ageMs > LOCK_STALE_MS) {
@@ -453,17 +477,17 @@ export class NotebookLibrary {
               `  ⚠️  Removing stale library.lock (${Math.round(ageMs / 1000)}s old — holder likely crashed)`
             );
             fs.unlinkSync(this.lockPath);
-            continue;
+            removedStale = true;
           }
         } catch {
-          continue; // lock vanished between open and stat — try again immediately
+          // The lock vanished between open and stat, or could not be
+          // stat'd/unlinked. Either way: fall through to the sleep so this
+          // cannot become a busy loop.
         }
 
-        if (Date.now() >= deadline) {
-          log.warning("  ⚠️  library.lock still held — proceeding unlocked (merge still applies)");
-          return null;
-        }
-        sleepSync(LOCK_RETRY_MS);
+        // Retry immediately ONLY when we actually removed the stale lock;
+        // otherwise back off.
+        if (!removedStale) sleepSync(LOCK_RETRY_MS);
       }
     }
   }

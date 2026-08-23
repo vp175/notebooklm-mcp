@@ -261,6 +261,31 @@ export class CleanupManager {
   }
 
   /**
+   * True when `dir` is (or contains) this install's LIVE data or config
+   * directory.
+   *
+   * CRITICAL, platform-specific: `getManualLegacyPaths()` lists the
+   * non-suffixed application directories, and on macOS and Linux those ARE the
+   * live ones — env-paths only nests a `\Data` / `\Config` subdirectory on
+   * Windows (`~/Library/Application Support/notebooklm-mcp` and
+   * `~/.local/share/notebooklm-mcp` are `CONFIG.dataDir` itself). Listing them
+   * under "Legacy Installation" therefore deleted the live data directory —
+   * `library.json` and the Chrome profile included — even when the caller
+   * passed `preserve_library: true` and was told "the notebook library will be
+   * KEPT". The Windows layout hid it: there the same entry is the PARENT of
+   * `dataDir`, which the parent-guard already refuses.
+   */
+  private isLiveInstallPath(dir: string): boolean {
+    const resolved = path.resolve(dir);
+    for (const live of [CONFIG.dataDir, CONFIG.configDir]) {
+      const liveResolved = path.resolve(live);
+      if (resolved === liveResolved) return true;
+      if (this.isStrictlyInside(liveResolved, resolved)) return true; // dir contains it
+    }
+    return false;
+  }
+
+  /**
    * True when `child` resolves to a location strictly below `parent`.
    * Uses the relative-path form rather than `startsWith`, which would treat
    * `/data-old` as living inside `/data`.
@@ -502,6 +527,13 @@ export class CleanupManager {
       // and any paths that envPaths might miss
       const manualLegacyPaths = this.getManualLegacyPaths();
       for (const dir of manualLegacyPaths) {
+        // Never let a "legacy" entry name the LIVE install (see
+        // `isLiveInstallPath`) — on macOS/Linux they are the same directory,
+        // and this category ignores `preserveLibrary`.
+        if (this.isLiveInstallPath(dir)) {
+          log.dim(`  ↩︎  Skipping ${dir} — it is this install's live data/config directory`);
+          continue;
+        }
         if (
           (await this.pathExists(dir)) &&
           !allPaths.has(dir) &&

@@ -161,13 +161,29 @@ async function writeWebResponse(res: ServerResponse, response: Response): Promis
   // An SSE response streams indefinitely; piping chunk-by-chunk keeps it live
   // instead of buffering a body that never completes.
   const reader = response.body.getReader();
+
+  // A client that walks away must not leave the pump (and the SDK stream
+  // behind it) running forever.
+  let clientGone = false;
+  const onClose = () => {
+    clientGone = true;
+    void reader.cancel().catch(() => undefined);
+  };
+  res.on("close", onClose);
+
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
-      if (value) res.write(Buffer.from(value));
+      if (done || clientGone) break;
+      if (!value) continue;
+      // Respect backpressure: without this a slow consumer buffers the whole
+      // stream in this process's memory.
+      if (!res.write(Buffer.from(value))) {
+        await new Promise<void>((resolve) => res.once("drain", resolve));
+      }
     }
   } finally {
+    res.off("close", onClose);
     res.end();
   }
 }

@@ -1058,7 +1058,14 @@ export async function downloadViaSingleMenuItem(
   await clickFirstVisible(page, moreMenuSelectors, "artifact more-menu button");
   await safeSleep(page, 250);
 
-  const popupPromise = page.context().waitForEvent("page", { timeout: 15_000 });
+  // `page.waitForEvent("popup")`, NOT `page.context().waitForEvent("page")`.
+  // Every session in this server shares ONE browser context, so the context-
+  // level event fires for a page opened by ANY session: a session being
+  // created while this download is in flight would be captured here as "the
+  // popup". The download then waits on the wrong page until it times out, and
+  // the `finally` below CLOSES that other session's page, failing it with
+  // "Target closed". The popup event is scoped to pages this page opened.
+  const popupPromise = page.waitForEvent("popup", { timeout: 15_000 });
   // Attach a handler immediately: if `clickFirstVisible` below throws before
   // this promise is read, an eventual timeout rejection here would
   // otherwise become an UNHANDLED rejection. index.ts installs a

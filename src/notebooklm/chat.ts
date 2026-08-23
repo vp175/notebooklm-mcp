@@ -208,14 +208,40 @@ function isPlaceholder(text: string): boolean {
   return PLACEHOLDER_SNIPPETS.some((s) => lower === s || lower.startsWith(s));
 }
 
+/**
+ * Is this text SHAPED like one of NotebookLM's own banners rather than an
+ * answer that merely talks about errors?
+ *
+ * Same rule the placeholder check uses, and for the same reason: a bare
+ * `includes()` over the whole answer misfires on real content. Ask a
+ * troubleshooting notebook "what does the user see when the sync fails?" and
+ * the answer legitimately contains "an error occurred … try again later"; ask
+ * an API notebook about throttling and it contains "rate limit exceeded".
+ * Without a shape gate those answers were THROWN as failures — and the
+ * rate-limit one reached the caller as the 50-queries/day quota message,
+ * advising the user to re-authenticate for no reason.
+ */
+function bannerShaped(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return trimmed.length < 200 || !/[.!?。！？]/.test(trimmed);
+}
+
+/** Strip leading glyphs/quotes so "⚠️ An error occurred" still matches. */
+function bannerBody(text: string): string {
+  return text.trim().toLowerCase().replace(/^[^\p{L}\p{N}]+/u, "");
+}
+
 function isErrorMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return ERROR_SNIPPETS.some((s) => lower.includes(s));
+  if (!bannerShaped(text)) return false;
+  const body = bannerBody(text);
+  return ERROR_SNIPPETS.some((s) => body === s || body.startsWith(s) || body.includes(s));
 }
 
 function isRateLimitText(text: string): boolean {
-  const lower = text.toLowerCase();
-  return RATE_LIMIT_MESSAGES.some((s) => lower.includes(s));
+  if (!bannerShaped(text)) return false;
+  const body = bannerBody(text);
+  return RATE_LIMIT_MESSAGES.some((s) => body === s || body.startsWith(s) || body.includes(s));
 }
 
 /**
@@ -349,6 +375,8 @@ export async function waitForStableAnswer(
    * old one".
    */
   let sawChange = false;
+  /** Consecutive polls that have seen a grown container count. */
+  let newContainerStreak = 0;
   const initialKey = answerKey((await readLatestAnswer(page)) ?? "");
 
   while (Date.now() < deadline && pollCount < maxPolls) {
@@ -381,6 +409,7 @@ export async function waitForStableAnswer(
         // Counting failed — fall back to the text comparison below.
       }
     }
+    newContainerStreak = newContainerPresent ? newContainerStreak + 1 : 0;
 
     if (candidate && answerKey(candidate) !== initialKey) {
       sawChange = true;
@@ -395,7 +424,14 @@ export async function waitForStableAnswer(
       // while the text was still the previous turn's). So: skip anything that
       // matches a prior answer UNLESS a new container exists AND the text has
       // changed since this wait began.
-      const isPrior = ignoreKeys.has(answerKey(candidate)) && !(newContainerPresent && sawChange);
+      // A grown container count that has HELD for two consecutive polls is
+      // sufficient on its own: the new answer exists and is fully painted, so
+      // even text identical to an earlier answer is this turn's answer. Without
+      // this, a repeated question whose (identical) answer paints inside a
+      // single 750 ms poll gap never sets `sawChange` and the call burned the
+      // whole 10-minute timeout.
+      const newAnswerProven = newContainerPresent && (sawChange || newContainerStreak >= 2);
+      const isPrior = ignoreKeys.has(answerKey(candidate)) && !newAnswerProven;
 
       if (!isEcho && !isPrior) {
         // Loading placeholders ("Parsing the data…", "Thinking…", …) are
