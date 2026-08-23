@@ -570,11 +570,44 @@ export async function ensureStudioPanelExpanded(
   }
 }
 
-async function isReady(page: Page, strategy: StudioOutputStrategy): Promise<boolean> {
+/**
+ * Default budget for a repeat readiness poll — the page is already warm.
+ */
+const READY_POLL_MS = 500;
+
+/**
+ * Budget for the FIRST look on a page that may have just loaded.
+ *
+ * A session created for this very call finishes `init()` as soon as the chat
+ * input exists, but the Studio panel paints its tiles later. Checking with the
+ * poll-sized budget then reports `not_started` for an output that is plainly
+ * there — live-observed: a mindmap read failed with "No completed mindmap
+ * output found" 4 s after the session was created, and the identical call on
+ * the same (now warm) session succeeded.
+ */
+const READY_COLD_MS = 8_000;
+
+async function isReady(
+  page: Page,
+  strategy: StudioOutputStrategy,
+  timeoutMs: number = READY_POLL_MS
+): Promise<boolean> {
   // Genuine wait: the completed tile can still be painting when a status
   // poll lands, and a non-polling check reports `not_started` for a tile
   // that is milliseconds away from being there.
-  return waitForVisible(page.locator(joinAlt(strategy.readySelectors)).first(), 500);
+  return waitForVisible(page.locator(joinAlt(strategy.readySelectors)).first(), timeoutMs);
+}
+
+/**
+ * Get the Studio panel into a state where its tiles can be seen, then take the
+ * first readiness look with the cold-page budget. Every entry point that
+ * decides "is there a completed output?" must go through this — reading the
+ * panel without expanding it was why a status/content call on a fresh session
+ * could answer `not_started` for an output that existed.
+ */
+async function readyOnColdPage(page: Page, strategy: StudioOutputStrategy): Promise<boolean> {
+  await ensureStudioPanelExpanded(page, strategy.triggerSelectors);
+  return isReady(page, strategy, READY_COLD_MS);
 }
 
 /* ------------------------------------------------------------------ *
@@ -759,7 +792,7 @@ export async function generateStudioOutput(
 
   try {
     await preflightCloseViewer(page, `generate_studio_output("${type}")`);
-    if (await isReady(page, strategy)) {
+    if (await readyOnColdPage(page, strategy)) {
       clearInFlight(page, type);
       log.info(`  ✅ Studio output "${type}" already generated, skipping trigger`);
       return withWarnings({ status: "ready", alreadyExisted: true }, warnings);
@@ -830,7 +863,7 @@ export async function getStudioOutputStatus(
     // is exactly how a ready Audio Overview was observed reporting
     // `not_started` live.
     await preflightCloseViewer(page, `get_studio_output_status("${type}")`);
-    if (await isReady(page, strategy)) {
+    if (await readyOnColdPage(page, strategy)) {
       clearInFlight(page, type);
       return { status: "ready" };
     }
@@ -914,7 +947,7 @@ export async function downloadStudioOutput(
   }
   try {
     await preflightCloseViewer(page, `download_studio_output("${type}")`);
-    if (!(await isReady(page, strategy))) {
+    if (!(await readyOnColdPage(page, strategy))) {
       return {
         success: false,
         message: `No completed "${type}" output found. Call generate_studio_output first and wait for get_studio_output_status to report "ready".`,
@@ -944,7 +977,7 @@ export async function getStudioOutputContent(
   }
   try {
     await preflightCloseViewer(page, `get_studio_output_content("${type}")`);
-    if (!(await isReady(page, strategy))) {
+    if (!(await readyOnColdPage(page, strategy))) {
       return {
         success: false,
         message: `No completed "${type}" output found. Call generate_studio_output first and wait for get_studio_output_status to report "ready".`,

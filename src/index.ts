@@ -31,13 +31,14 @@
  */
 
 import {
+  CLIENT_CAPABILITIES_META_KEY,
   METHOD_NOT_FOUND,
   ProtocolError,
   Server,
   isInputRequiredResult,
 } from "@modelcontextprotocol/server";
 import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server/stdio";
-import type { ServerContext, Tool } from "@modelcontextprotocol/server";
+import type { ClientCapabilities, ServerContext, Tool } from "@modelcontextprotocol/server";
 
 import type { ProgressCallback } from "./types.js";
 import { AuthManager } from "./auth/auth-manager.js";
@@ -180,13 +181,43 @@ For synchronous behaviour pass \`wait_for_completion: true\` to
  * We read the spec location first and keep the old one as a tolerated fallback
  * for any caller that copied the previous behaviour.
  */
-function extractProgressToken(params: {
-  _meta?: unknown;
-  arguments?: Record<string, unknown>;
-}): string | number | undefined {
+function extractProgressToken(
+  params: {
+    _meta?: unknown;
+    arguments?: Record<string, unknown>;
+  },
+  ctx?: ServerContext
+): string | number | undefined {
+  // The v2 SDK hands the handler its `_meta` on the request context (with the
+  // reserved `io.modelcontextprotocol/*` envelope keys already lifted out), so
+  // this is the authoritative place to look. `params._meta` is checked next
+  // for transports/eras that leave it in place, and the old
+  // `arguments._meta` is kept only as a tolerated fallback.
+  const fromCtx = readProgressToken(ctx?.mcpReq?._meta);
+  if (fromCtx !== undefined) return fromCtx;
   const fromMeta = readProgressToken(params?._meta);
   if (fromMeta !== undefined) return fromMeta;
   return readProgressToken(params?.arguments?._meta);
+}
+
+/**
+ * The calling client's declared capabilities.
+ *
+ * On protocol revision 2026-07-28 there is no `initialize` handshake, so
+ * `Server.getClientCapabilities()` returns UNDEFINED and every capability gate
+ * built on it silently reads "not supported" — which for a confirmation gate
+ * means a destructive tool proceeds unconfirmed. Verified on the wire: the
+ * envelope carried `{elicitation:{}}` while the accessor returned undefined.
+ * The per-request envelope is authoritative on the modern era; the accessor is
+ * the fallback for 2025-era connections.
+ */
+function clientCapabilities(server: Server, ctx?: ServerContext): ClientCapabilities | undefined {
+  const envelope = ctx?.mcpReq?.envelope as Record<string, unknown> | undefined;
+  const fromEnvelope = envelope?.[CLIENT_CAPABILITIES_META_KEY];
+  if (fromEnvelope && typeof fromEnvelope === "object") {
+    return fromEnvelope as ClientCapabilities;
+  }
+  return server.getClientCapabilities();
 }
 
 function readProgressToken(meta: unknown): string | number | undefined {
@@ -471,10 +502,10 @@ class NotebookLMMCPServer {
     // Handle tool calls
     server.setRequestHandler("tools/call", async (request, ctx: ServerContext) => {
       const { name, arguments: args } = request.params;
-      const progressToken = extractProgressToken(request.params);
+      const progressToken = extractProgressToken(request.params, ctx);
 
       log.info(`🔧 [MCP] Tool call: ${name}`);
-      if (progressToken) {
+      if (progressToken !== undefined) {
         log.info(`  📊 Progress token: ${progressToken}`);
       }
 
@@ -505,7 +536,11 @@ class NotebookLMMCPServer {
       // discard an otherwise-successful tool result, so failures are logged
       // and swallowed rather than propagated.
       const sendProgress = async (message: string, progress?: number, total?: number) => {
-        if (!progressToken) return;
+        // `0` is a legitimate progress token (the SDK client uses the
+        // JSON-RPC message id, which starts at 0), so this must be an
+        // explicit undefined check — a truthiness test silently dropped
+        // every progress notification for the first call on a connection.
+        if (progressToken === undefined) return;
         try {
           // `ctx.mcpReq.notify` correlates the notification with THIS request,
           // which the 2026-07-28 revision needs (and which a bare
@@ -565,10 +600,9 @@ class NotebookLMMCPServer {
           // A client that never declared `elicitation` cannot answer a
           // confirmation request, so the handlers keep their old
           // no-confirmation behaviour instead of failing with a capability
-          // error. On 2026-07-28 this accessor is backfilled per request from
-          // the call's own `_meta` envelope; on a 2025-era connection it is
-          // the initialize-declared value.
-          canElicit: server.getClientCapabilities()?.elicitation !== undefined,
+          // error. Read from the per-request envelope on 2026-07-28 — see
+          // `clientCapabilities`.
+          canElicit: clientCapabilities(server, ctx)?.elicitation !== undefined,
           // Answers carried by a retried call (multi-round-trip). Empty on
           // the first call.
           responses: ctx.mcpReq.inputResponses,

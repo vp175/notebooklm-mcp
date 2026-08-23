@@ -18,7 +18,11 @@ import type { SharedContextManager } from "./shared-context-manager.js";
 import type { AuthManager } from "../auth/auth-manager.js";
 import { humanType, randomDelay } from "../utils/stealth-utils.js";
 import { snapshotAllResponses } from "../utils/page-utils.js";
-import { waitForStableAnswer, snapshotPriorAnswers } from "../notebooklm/chat.js";
+import {
+  waitForStableAnswer,
+  snapshotPriorAnswers,
+  countAnswerContainers,
+} from "../notebooklm/chat.js";
 import {
   extractCitations as extractCitationsFromPage,
   type SourceFormat,
@@ -435,6 +439,9 @@ export class BrowserSession {
       // (issue #43). Falls back to the legacy snapshot only if the v2 helper
       // produced nothing, so we don't regress when the new selectors miss.
       log.info(`  📸 Snapshotting existing responses...`);
+      // Count BEFORE the question is submitted: the wait uses growth in the
+      // container count as its primary signal that a new answer arrived.
+      const priorAnswerCount = await countAnswerContainers(page);
       let existingResponses = await snapshotPriorAnswers(page);
       if (existingResponses.length === 0) {
         existingResponses = await snapshotAllResponses(page);
@@ -479,6 +486,7 @@ export class BrowserSession {
         timeoutMs: CONFIG.answerTimeoutMs,
         pollIntervalMs: 750,
         ignoreTexts: existingResponses,
+        priorAnswerCount,
       });
 
       if (!answer) {

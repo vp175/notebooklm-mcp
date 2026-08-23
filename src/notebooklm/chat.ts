@@ -237,6 +237,13 @@ export interface AskOptions {
   pollIntervalMs?: number;
   /** Texts known *before* the question was submitted. Used to skip prior answers. */
   ignoreTexts?: string[];
+  /**
+   * How many answer containers existed before the question was submitted.
+   * When the page grows past this, the newest container is this turn's answer
+   * regardless of what it says — which is the only way to accept an answer
+   * that happens to be identical to an earlier one.
+   */
+  priorAnswerCount?: number;
   /** How many consecutive identical polls count as "answer settled". Default 3. */
   stablePolls?: number;
 }
@@ -273,6 +280,23 @@ export async function snapshotPriorAnswers(page: Page): Promise<string[]> {
 }
 
 /**
+ * How many answer containers are on the page right now.
+ *
+ * Text alone cannot tell a NEW answer from a prior one when the two are
+ * identical — ask the same question twice in one notebook and NotebookLM
+ * answers the same way, so an ignore-list keyed on text rejects the genuine
+ * new answer forever and the wait runs to its 10-minute timeout (observed).
+ * Counting containers settles it structurally: once a new one exists, the last
+ * container IS this turn's answer whatever it says.
+ */
+export async function countAnswerContainers(page: Page): Promise<number> {
+  return page
+    .locator(Selectors.chat.answerText)
+    .count()
+    .catch(() => 0);
+}
+
+/**
  * Wait for the *latest* answer text to appear and stabilise.
  *
  * Returns the sanitised final text, or `null` on timeout. Ordinary UI hiccups
@@ -294,6 +318,7 @@ export async function waitForStableAnswer(
     timeoutMs = 600_000,
     pollIntervalMs = 750,
     ignoreTexts = [],
+    priorAnswerCount,
     stablePolls = 3,
   } = options;
 
@@ -317,6 +342,14 @@ export async function waitForStableAnswer(
   let lastSeen: string | null = null;
   let stableStreak = 0;
   let pollCount = 0;
+  /**
+   * Set once the text differs from what was on the page when this wait began.
+   * Together with a grown container count this is what distinguishes "the new
+   * answer happens to read like an old one" from "we are still looking at the
+   * old one".
+   */
+  let sawChange = false;
+  const initialKey = answerKey((await readLatestAnswer(page)) ?? "");
 
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
@@ -335,9 +368,34 @@ export async function waitForStableAnswer(
       // Non-fatal extraction blip — try again next tick.
     }
 
+    // Structural check first: has a NEW answer container appeared? Once it
+    // has, whatever the newest container says is this turn's answer — even if
+    // it is word-for-word a previous one (ask the same question twice and it
+    // will be). Only when the count has not grown do we fall back to the
+    // text-based ignore list.
+    let newContainerPresent = false;
+    if (priorAnswerCount !== undefined) {
+      try {
+        newContainerPresent = (await countAnswerContainers(page)) > priorAnswerCount;
+      } catch {
+        // Counting failed — fall back to the text comparison below.
+      }
+    }
+
+    if (candidate && answerKey(candidate) !== initialKey) {
+      sawChange = true;
+    }
+
     if (candidate) {
       const isEcho = candidate.toLowerCase() === echoLower;
-      const isPrior = ignoreKeys.has(answerKey(candidate));
+      // Both guards apply. The text guard alone cannot accept a genuine answer
+      // that repeats an earlier one; the count alone cannot be trusted, because
+      // the container count grows as soon as the question is submitted — before
+      // any answer text exists (observed: poll 1 already saw the higher count
+      // while the text was still the previous turn's). So: skip anything that
+      // matches a prior answer UNLESS a new container exists AND the text has
+      // changed since this wait began.
+      const isPrior = ignoreKeys.has(answerKey(candidate)) && !(newContainerPresent && sawChange);
 
       if (!isEcho && !isPrior) {
         // Loading placeholders ("Parsing the data…", "Thinking…", …) are
@@ -390,16 +448,29 @@ export async function waitForStableAnswer(
  */
 async function readLatestAnswer(page: Page): Promise<string | null> {
   try {
-    const raw = await page
-      .locator(Selectors.chat.latestAnswerText)
-      .last()
-      .innerText({ timeout: 2_000 });
-    const cleaned = sanitizeAnswer(raw);
-    return cleaned.length > 0 ? cleaned : null;
+    // Read every answer container through the SAME selector the container
+    // count uses, and take the last one that actually has text.
+    //
+    // Two failure modes are being avoided at once:
+    //  - `.to-user-container:last-child .message-text-content` (the old
+    //    reader) resolves to an OLDER container whenever the newest one is not
+    //    its parent's last child, so the wait saw the PREVIOUS turn's text as a
+    //    stable answer — two different questions in one session came back
+    //    byte-identical (223 chars, verified live).
+    //  - taking `.last()` unconditionally reads the freshly-appended container
+    //    while it is still EMPTY, so the answer never appears at all.
+    // Last non-empty match is the only reading that survives both.
+    const texts = await page.locator(Selectors.chat.answerText).allInnerTexts();
+    for (let i = texts.length - 1; i >= 0; i--) {
+      const cleaned = sanitizeAnswer(texts[i] ?? "");
+      if (cleaned.length > 0) return cleaned;
+    }
+    return null;
   } catch {
     return null;
   }
 }
+
 
 /**
  * Strip Material-icon labels (`more_vert`, `more_horiz`, …) and orphaned
