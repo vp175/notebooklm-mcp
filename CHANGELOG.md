@@ -7,11 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Fork of upstream v2.0.0. A multi-agent review pass over the whole server, plus
-the generic Studio-output engine. Not published to npm — the `notebooklm-mcp`
-package on npm is upstream and contains none of this.
+Fork of upstream v2.0.0. A multi-agent review pass over the whole server, the
+generic Studio-output engine, and a move to **MCP protocol revision
+2026-07-28**. Not published to npm — the `notebooklm-mcp` package on npm is
+upstream and contains none of this.
 
 ### Added
+
+- **MCP protocol revision 2026-07-28** — the stateless revision: no
+  `initialize` handshake, no `Mcp-Session-Id`, a per-request `_meta` envelope
+  carrying the protocol version and client capabilities, a mandatory
+  `server/discover`, and `resultType`/`ttlMs`/`cacheScope` on results. The
+  server is **dual-era**: 2025-06-18 clients keep working unchanged. Moved to
+  `@modelcontextprotocol/server` 2.0.0; the entry point (`serveStdio` for
+  stdio, `createMcpHandler` for HTTP) is what selects the era — upgrading the
+  package alone puts no 2026-07-28 byte on the wire. Confirmation prompts
+  became the multi-round-trip `inputRequired` return, which the SDK's legacy
+  shim still serves to 2025-era clients as a real elicitation request. Full
+  write-up, including the fail-open trap it exposed, in
+  `MIGRATION-2026-07-28.md`.
 
 - **Generic Studio-output tools**: `generate_studio_output`,
   `get_studio_output_status`, `download_studio_output`,
