@@ -231,6 +231,13 @@ async function pickSourceType(page: Page, type: SourceType): Promise<void> {
   const candidates =
     type === "url" ? Selectors.sources.sourceTypeUrl : Selectors.sources.sourceTypeText;
   const overlay = page.locator(Selectors.sources.overlayPane).first();
+  // The type buttons render a beat after the dialog container, and
+  // `isVisible()` does not wait — give them a bounded window first.
+  await overlay
+    .locator(joinAlt(candidates))
+    .first()
+    .waitFor({ state: "visible", timeout: 5_000 })
+    .catch(() => undefined);
   for (const sel of candidates) {
     const target = overlay.locator(sel).first();
     if (await target.isVisible({ timeout: 1_000 }).catch(() => false)) {
@@ -250,7 +257,18 @@ async function fillSourceContent(page: Page, input: AddSourceInput): Promise<voi
   // animated, so a tight 500 ms wait beats a busy poll).
   await safeSleep(page, 500);
 
+  // The sub-view's own field first (waited for, bounded), then the generic
+  // fallbacks — none of which match the dialog's web-search box.
+  const typeInputs =
+    input.type === "url" ? Selectors.sources.sourceInputUrl : Selectors.sources.sourceInputText;
+  await page
+    .locator(joinAlt(typeInputs))
+    .first()
+    .waitFor({ state: "visible", timeout: 5_000 })
+    .catch(() => undefined);
+
   const inputCandidates = [
+    ...typeInputs,
     Selectors.sources.overlayTextarea,
     Selectors.sources.overlayInput,
     `${Selectors.sources.overlayPane} textarea:not(.query-box-input):not(.query-box-textarea)`,

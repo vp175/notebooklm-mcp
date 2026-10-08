@@ -145,6 +145,18 @@ upstream and contains none of this.
   closed the shared browser context only when sessions existed, but
   `discover_notebooks` opens that context without creating a session.
   `setup_auth` now always closes it first, as `re_auth` already did.
+- **`add_source` re-anchored to the current NotebookLM UI (live-verified
+  2026-10-08).** The Add-source dialog changed: the type buttons are now
+  `button.source-action-button` (Website icon `link_2`), the content fields
+  are `textarea[formcontrolname="urls"]` / `"copiedText"`, and Insert is
+  `button[mat-flat-button][color="primary"]`. The old code reached them only
+  through loose text fallbacks, and its generic `[role="dialog"] textarea`
+  candidate could land in the dialog's new "Search the web" box or in a
+  hidden emoji picker that every notebook page now carries. Users reported
+  "Could not find an input field inside the Add-source overlay". Two bounded
+  waits now let the dialog's contents render before the type pick and the
+  field search. Verified on a scratch notebook: two text and two URL adds,
+  each confirmed in the notebook's source list.
 - **Failed browser-touching tools carried no top-level `error`.** The eight
   session-backed tools returned `success: false` with the detail buried in
   `data.result`; they now also return `error` (the engine's message), like

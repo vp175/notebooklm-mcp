@@ -43,6 +43,17 @@
 const AUDIO_TILE_ICON_ANCHOR = 'mat-icon:text-is("audio_magic_eraser")';
 
 /**
+ * Anchor for the Add-source modal. Live-verified 2026-10-08: every notebook
+ * page now permanently carries a hidden emoji picker (the notebook's cover
+ * emoji, `div.emoji-keyboard__container[role="dialog"]`, with its own text
+ * input) BEFORE the real `mat-dialog-container[role="dialog"]` in document
+ * order, so a bare `[role="dialog"]` can resolve to the hidden picker.
+ * Module-level for the same reason as `AUDIO_TILE_ICON_ANCHOR`: the
+ * `sources.*` entries below compose it into their own selectors.
+ */
+const ADD_SOURCE_DIALOG = '[role="dialog"]:not(.emoji-keyboard__container)';
+
+/**
  * Material-Symbols icon ligature per Studio output type. Confirmed LIVE
  * 2026-08-23 against the real notebook.google.com layout: every trigger
  * tile in `.create-artifact-button-container` carries one of these as its
@@ -233,17 +244,43 @@ export const Selectors = {
      * the moment the modal mounts — race-free against the `.mdc-dialog--open`
      * animation class and resistant to Material-UI version bumps. Avoid
      * `.cdk-overlay-pane` (matches every dropdown / emoji picker / menu).
+     * Excludes the hidden cover-emoji picker — see `ADD_SOURCE_DIALOG`.
      */
-    overlayPane: '[role="dialog"]',
-    overlayInput: '[role="dialog"] input[type="text"]:not([readonly])',
-    overlayTextarea: '[role="dialog"] textarea',
+    overlayPane: ADD_SOURCE_DIALOG,
+    overlayInput: `${ADD_SOURCE_DIALOG} input[type="text"]:not([readonly])`,
+    /**
+     * Excludes the dialog's own "Search the web for new sources" box
+     * (`textarea.query-box-textarea`, live-verified 2026-10-08), which is
+     * visible on the dialog's first view; typing into it and pressing Enter
+     * starts a web search instead of adding a source.
+     */
+    overlayTextarea: `${ADD_SOURCE_DIALOG} textarea:not(.query-box-input):not(.query-box-textarea)`,
+    /**
+     * Content field of the Website / Copied-text sub-view. Live-verified
+     * 2026-10-08: each sub-view holds a single textarea whose Angular
+     * `formcontrolname` (locale-free) is `urls` / `copiedText`; the
+     * aria-labels are English-only fallbacks.
+     */
+    sourceInputUrl: [
+      `${ADD_SOURCE_DIALOG} textarea[formcontrolname="urls"]`,
+      `${ADD_SOURCE_DIALOG} textarea[aria-label="Enter URLs"]`,
+    ],
+    sourceInputText: [
+      `${ADD_SOURCE_DIALOG} textarea[formcontrolname="copiedText"]`,
+      `${ADD_SOURCE_DIALOG} textarea.copied-text-input-textarea`,
+      `${ADD_SOURCE_DIALOG} textarea[aria-label="Pasted text"]`,
+    ],
     /**
      * Source-type buttons in the Add-source overlay. Google ships them
      * *without* aria-labels — the only stable, language-agnostic anchor is
      * the Material-Symbols icon name baked into a `<mat-icon>` text node.
+     * Live-verified 2026-10-08: the buttons are now
+     * `button.source-action-button` (no `.drop-zone-icon-button`), and the
+     * Website button's icon is `link_2` (it also carries `video_youtube`).
      */
     sourceTypeUrl: [
       // Icon-anchored (language-free) — primary path.
+      'button.source-action-button:has(mat-icon:text-is("link_2"))',
       "button.drop-zone-icon-button:has(mat-icon.youtube-icon)",
       'button.drop-zone-icon-button:has(mat-icon:text-is("link"))',
       // Visible-text fallbacks for the eight major locales.
@@ -259,6 +296,7 @@ export const Selectors = {
     ],
     sourceTypeText: [
       // Icon-anchored (language-free) — primary path.
+      'button.source-action-button:has(mat-icon:text-is("content_paste"))',
       'button.drop-zone-icon-button:has(mat-icon:text-is("content_paste"))',
       // Visible-text fallbacks for major locales.
       'button.drop-zone-icon-button:has-text("Kopierter Text")',
@@ -292,8 +330,13 @@ export const Selectors = {
      * Primary submit button in the add-source dialog. Material's
      * `.mdc-button--raised` class is the most stable anchor; per-locale
      * visible-text variants are fallbacks for older builds.
+     * Live-verified 2026-10-08: Insert is now an unelevated
+     * `button[mat-flat-button][color="primary"]` — the only such button in
+     * the Website / Copied-text sub-views (the first view has none).
      */
     insertConfirm: [
+      // Attribute-anchored (language-free).
+      'button[mat-flat-button][color="primary"]',
       // Class-anchored (language-free).
       'button.mdc-button--raised:has-text("Insert")',
       'button.mat-flat-button:has-text("Insert")',
