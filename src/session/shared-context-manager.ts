@@ -37,7 +37,6 @@ import path from "path";
 export class SharedContextManager {
   private authManager: AuthManager;
   private globalContext: BrowserContext | null = null;
-  private contextCreatedAt: number | null = null;
   private currentProfileDir: string | null = null;
   private isIsolatedProfile: boolean = false;
   private currentHeadlessMode: boolean | null = null;
@@ -103,7 +102,6 @@ export class SharedContextManager {
     } catch {
       log.warning("  ⚠️  Context appears closed - will recreate");
       this.globalContext = null;
-      this.contextCreatedAt = null;
       this.currentHeadlessMode = null;
       return true;
     }
@@ -244,14 +242,12 @@ export class SharedContextManager {
       this.currentProfileDir = isolatedDir;
       this.isIsolatedProfile = true;
     }
-    this.contextCreatedAt = Date.now();
     this.currentHeadlessMode = shouldBeHeadless;
     // Track close event to force recreation next time
     try {
       this.globalContext.on("close", () => {
         log.warning("  🛑 Persistent context was closed externally");
         this.globalContext = null;
-        this.contextCreatedAt = null;
         this.currentHeadlessMode = null;
       });
     } catch {
@@ -291,7 +287,6 @@ export class SharedContextManager {
       try {
         await this.globalContext.close();
         this.globalContext = null;
-        this.contextCreatedAt = null;
         this.currentHeadlessMode = null;
         log.success("✅ Persistent context closed");
         log.success(`  💾 Profile saved: ${this.currentProfileDir || CONFIG.chromeProfileDir}`);
@@ -419,40 +414,6 @@ export class SharedContextManager {
         /* swallow — caller already logged the eviction context */
       }
     }
-  }
-
-  /**
-   * Get information about the global persistent context
-   */
-  getContextInfo(): {
-    exists: boolean;
-    age_seconds?: number;
-    age_hours?: number;
-    fingerprint_id?: string;
-    user_data_dir: string;
-    persistent: boolean;
-  } {
-    if (!this.globalContext) {
-      return {
-        exists: false,
-        user_data_dir: CONFIG.chromeProfileDir,
-        persistent: true,
-      };
-    }
-
-    const ageSeconds = this.contextCreatedAt
-      ? (Date.now() - this.contextCreatedAt) / 1000
-      : undefined;
-    const ageHours = ageSeconds ? ageSeconds / 3600 : undefined;
-
-    return {
-      exists: true,
-      age_seconds: ageSeconds,
-      age_hours: ageHours,
-      fingerprint_id: this.getContextId(),
-      user_data_dir: CONFIG.chromeProfileDir,
-      persistent: true,
-    };
   }
 
   /**

@@ -31,12 +31,57 @@ import fs from "fs/promises";
 import { safeSleep, isRecoverable } from "../browser/watchdog.js";
 import { log } from "../utils/logger.js";
 import { joinAlt, Selectors } from "./selectors.js";
-import type {
-  AudioStatus,
-  AudioGenerationResult,
-  DownloadAudioResult,
-  GenerateAudioOptions,
-} from "./audio.js";
+
+/** Lifecycle state of one Studio output, as read from the Studio panel. */
+export type StudioOutputStatus = "ready" | "in_progress" | "not_started";
+
+/** Options for {@link generateStudioOutput}. */
+export interface StudioGenerateOptions {
+  /** Optional focus prompt fed into the Customize dialog before generation. */
+  customPrompt?: string;
+  /**
+   * If `true`, block until the output's tile is ready (legacy behaviour). If
+   * `false` (default), return immediately after triggering generation —
+   * callers poll the matching status tool.
+   */
+  waitForCompletion?: boolean;
+  /** How long to wait when `waitForCompletion=true`. Default 10 min. */
+  timeoutMs?: number;
+}
+
+/** Result of a generate or status call, for any Studio output type. */
+export interface StudioGenerationResult {
+  status: StudioOutputStatus | "started" | "error";
+  /** True when this output already existed before this call. */
+  alreadyExisted?: boolean;
+  message?: string;
+  /**
+   * Non-fatal problems the caller should see rather than have silently
+   * swallowed — e.g. a supplied `difficulty` that this server does not wire
+   * into the Customize dialog, a `custom_prompt` the dialog had no field
+   * for, or a Customize dialog that would not close. Optional and additive:
+   * the tool layer passes result objects straight through.
+   */
+  warnings?: string[];
+}
+
+/** Result of downloading a completed file-kind Studio output. */
+export interface StudioDownloadResult {
+  success: boolean;
+  /** Absolute path actually written — may differ from the suggested name
+   * when an existing file forced a ` (2)`-style non-clashing name. */
+  filePath?: string;
+  /** Size on disk of the written file, in bytes. */
+  bytes?: number;
+  message?: string;
+}
+
+/** Result of reading a completed structured-kind Studio output. */
+export interface StudioContentResult {
+  success: boolean;
+  content?: unknown;
+  message?: string;
+}
 
 export type StudioOutputType =
   | "audio"
@@ -234,7 +279,7 @@ export interface StudioOutputStrategy {
    */
   readySelectors: readonly string[];
   trigger(page: Page, opts: StudioTriggerOptions): Promise<void | StudioTriggerOutcome>;
-  download?(page: Page, destDir: string): Promise<DownloadAudioResult>;
+  download?(page: Page, destDir: string): Promise<StudioDownloadResult>;
   extractContent?(page: Page): Promise<unknown>;
 }
 
@@ -261,13 +306,19 @@ export function registerStudioStrategy(
 
 function getStrategy(type: StudioOutputType): StudioOutputStrategy {
   const s = STRATEGIES.get(type);
-  if (!s) {
-    throw new Error(
-      `Studio output type "${type}" is not yet implemented by this server. ` +
-        `Implemented types: ${[...STRATEGIES.keys()].join(", ")}.`
-    );
-  }
+  if (!s) throw new Error(studioTypeNotImplementedMessage(type));
   return s;
+}
+
+/**
+ * The one "not yet implemented" message, used both by `getStrategy` and by the
+ * tool handlers' pre-session check (see `isStudioTypeImplemented`).
+ */
+export function studioTypeNotImplementedMessage(type: StudioOutputType): string {
+  return (
+    `Studio output type "${type}" is not yet implemented by this server (Phase 2). ` +
+    `Implemented types: ${[...STRATEGIES.keys()].join(", ")}.`
+  );
 }
 
 /**
@@ -281,11 +332,6 @@ function getStrategy(type: StudioOutputType): StudioOutputStrategy {
  */
 export function isStudioTypeImplemented(type: StudioOutputType): boolean {
   return STRATEGIES.has(type);
-}
-
-/** Currently-registered Studio output types, for building the same error message pre-session. */
-export function implementedStudioTypes(): StudioOutputType[] {
-  return [...STRATEGIES.keys()];
 }
 
 /**
@@ -757,17 +803,17 @@ async function detectInProgress(
  * ------------------------------------------------------------------ */
 
 function withWarnings(
-  result: AudioGenerationResult,
+  result: StudioGenerationResult,
   warnings: string[]
-): AudioGenerationResult & { warnings?: string[] } {
+): StudioGenerationResult & { warnings?: string[] } {
   return warnings.length > 0 ? { ...result, warnings } : result;
 }
 
 export async function generateStudioOutput(
   page: Page,
   type: StudioOutputType,
-  options: GenerateAudioOptions & { difficulty?: string } = {}
-): Promise<AudioGenerationResult> {
+  options: StudioGenerateOptions & { difficulty?: string } = {}
+): Promise<StudioGenerationResult> {
   const strategy = getStrategy(type);
   const { waitForCompletion = false } = options;
   // `timeout_ms: 0` previously reached `waitFor({timeout: 0})`, which
@@ -846,7 +892,7 @@ async function waitUntilReady(
   strategy: StudioOutputStrategy,
   type: StudioOutputType,
   timeoutMs: number
-): Promise<AudioGenerationResult> {
+): Promise<StudioGenerationResult> {
   const tile = page.locator(joinAlt(strategy.readySelectors)).first();
   await tile.waitFor({ state: "visible", timeout: clampTimeoutMs(timeoutMs) });
   clearInFlight(page, type);
@@ -856,7 +902,7 @@ async function waitUntilReady(
 export async function getStudioOutputStatus(
   page: Page,
   type: StudioOutputType
-): Promise<AudioGenerationResult> {
+): Promise<StudioGenerationResult> {
   const strategy = getStrategy(type);
   try {
     // A viewer left open by an earlier call hides the Studio panel, which
@@ -927,7 +973,7 @@ export async function downloadStudioOutput(
   page: Page,
   type: StudioOutputType,
   destDir: string
-): Promise<DownloadAudioResult> {
+): Promise<StudioDownloadResult> {
   const strategy = getStrategy(type);
   const kind = studioKindOf(type);
   if (kind !== "file" || !strategy.download) {
@@ -987,7 +1033,7 @@ function isTransientFrameError(error: unknown): boolean {
 export async function getStudioOutputContent(
   page: Page,
   type: StudioOutputType
-): Promise<{ success: boolean; content?: unknown; message?: string }> {
+): Promise<StudioContentResult> {
   const strategy = getStrategy(type);
   const kind = studioKindOf(type);
   if (kind !== "structured" || !strategy.extractContent) {
@@ -1100,7 +1146,7 @@ export async function downloadViaSingleMenuItem(
   destDir: string,
   fallbackFilename: string,
   opts: { saveTimeoutMs?: number } = {}
-): Promise<DownloadAudioResult> {
+): Promise<StudioDownloadResult> {
   await clickFirstVisible(page, moreMenuSelectors, "artifact more-menu button");
   await safeSleep(page, 250);
 
@@ -1229,10 +1275,38 @@ export async function getSandboxFrame(page: Page, timeoutMs = 10_000): Promise<F
   );
 }
 
-export type {
-  AudioStatus,
-  AudioGenerationResult,
-  DownloadAudioResult,
-  GenerateAudioOptions,
-  Locator,
-};
+/**
+ * The standard `trigger` for a Studio output: click the type's entry tile,
+ * then drive its Customize dialog through `triggerViaDialog`.
+ *
+ * The returned function forwards `opts` on purpose. The engine calls
+ * `strategy.trigger(page, { customPrompt })`; a trigger that took only `page`
+ * silently discarded the prompt, so generation ran over the whole notebook
+ * while the tool reported success.
+ */
+export function dialogTrigger(
+  triggerSelectors: readonly string[],
+  label: string
+): StudioOutputStrategy["trigger"] {
+  return (page, opts) =>
+    triggerViaDialog(page, triggerSelectors, label, { customPrompt: opts.customPrompt });
+}
+
+/**
+ * The standard `download` for a file-kind Studio output whose three-dot menu
+ * offers a single download item (see `downloadViaSingleMenuItem`).
+ */
+export function singleMenuItemDownload(
+  moreMenuSelectors: readonly string[],
+  menuItemSelectors: readonly string[],
+  fallbackFilename: string
+): NonNullable<StudioOutputStrategy["download"]> {
+  return (page, destDir) =>
+    downloadViaSingleMenuItem(
+      page,
+      moreMenuSelectors,
+      menuItemSelectors,
+      destDir,
+      fallbackFilename
+    );
+}

@@ -6,12 +6,9 @@
  * shared engine, with this file supplying only Audio's own selectors and
  * DOM interactions.
  *
- * This file remains the source of truth for the shared result/option types
- * (`AudioStatus`, `GenerateAudioOptions`, `AudioGenerationResult`,
- * `DownloadAudioResult`) — `studio-outputs.ts` imports them as `import
- * type` (erased at compile time, so there is no runtime circular-import
- * concern even though `studio-outputs.ts` is itself imported here for the
- * engine's functions).
+ * The shared result/option types (`StudioOutputStatus`,
+ * `StudioGenerateOptions`, `StudioGenerationResult`, `StudioDownloadResult`)
+ * live in `studio-outputs.ts`; this file imports them from there.
  *
  * CORRECTED 2026-08-23 (live-verified against the current Gemini Notebook
  * UI, real account): the 2026-05 "one click, no dialog" claim below is
@@ -19,8 +16,8 @@
  * ALWAYS opens a "Customize Audio Overview" `mat-dialog-container`
  * (Format/Language/Length/Sources/focus-prompt fields) behind a
  * `cdk-overlay-backdrop`; generation only starts once that dialog's
- * "Generate" button is clicked. `triggerAudio` now goes through
- * `triggerViaDialog` (studio-outputs.ts) to do exactly that — confirmed
+ * "Generate" button is clicked. Audio's trigger (built by `dialogTrigger`)
+ * goes through `triggerViaDialog` (studio-outputs.ts) to do exactly that — confirmed
  * live: dialog opens, Generate closes it (backdrop detaches), and
  * generation genuinely starts server-side. Before this fix, the bare click
  * this file used to make opened the dialog and stopped there — Audio
@@ -42,8 +39,9 @@
  *     exist in the current DOM) with a three-dot menu containing a
  *     `save_alt`-icon "Download" item.
  *
- * DOWNLOAD FLOW — fixed 2026-08-23, `downloadAudio` now delegates to the
- * shared `downloadViaSingleMenuItem` (studio-outputs.ts), which itself had
+ * DOWNLOAD FLOW — fixed 2026-08-23. Audio's download (built by
+ * `singleMenuItemDownload`) delegates to the shared
+ * `downloadViaSingleMenuItem` (studio-outputs.ts), which itself had
  * a real, live-confirmed bug: clicking "Download" opens a NEW popup page,
  * and the browser `download` event fires there — not on the original page.
  * The old code (both here and the shared helper) listened on the wrong
@@ -81,50 +79,14 @@ import {
   generateStudioOutput,
   getStudioOutputStatus,
   downloadStudioOutput,
-  triggerViaDialog,
-  downloadViaSingleMenuItem,
+  dialogTrigger,
+  singleMenuItemDownload,
 } from "./studio-outputs.js";
-import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
-
-export type AudioStatus = "ready" | "in_progress" | "not_started";
-
-export interface GenerateAudioOptions {
-  /** Optional focus prompt fed into the customise dialog before generation. */
-  customPrompt?: string;
-  /**
-   * If `true`, block until the audio tile is ready (legacy behaviour). If
-   * `false` (default), return immediately after triggering generation —
-   * callers poll via `get_audio_status`.
-   */
-  waitForCompletion?: boolean;
-  /** How long to wait when `waitForCompletion=true`. Default 10 min. */
-  timeoutMs?: number;
-}
-
-export interface AudioGenerationResult {
-  status: AudioStatus | "started" | "error";
-  /** True when an Audio Overview already existed before this call. */
-  alreadyExisted?: boolean;
-  message?: string;
-  /**
-   * Non-fatal problems the caller should see rather than have silently
-   * swallowed — e.g. a supplied `difficulty` that this server does not wire
-   * into the Customize dialog, a `custom_prompt` the dialog had no field
-   * for, or a Customize dialog that would not close. Optional and additive:
-   * the tool layer passes result objects straight through.
-   */
-  warnings?: string[];
-}
-
-export interface DownloadAudioResult {
-  success: boolean;
-  /** Absolute path actually written — may differ from the suggested name
-   * when an existing file forced a ` (2)`-style non-clashing name. */
-  filePath?: string;
-  /** Size on disk of the written file, in bytes. */
-  bytes?: number;
-  message?: string;
-}
+import type {
+  StudioGenerateOptions,
+  StudioGenerationResult,
+  StudioDownloadResult,
+} from "./studio-outputs.js";
 
 /**
  * Detect a generation-in-progress tile. NotebookLM renders a tile with a
@@ -161,22 +123,6 @@ const GENERATION_IN_PROGRESS_PHRASES = [
   "音声の概要を生成しています",
 ];
 
-async function triggerAudio(page: Page, opts: StudioTriggerOptions): Promise<StudioTriggerOutcome> {
-  return triggerViaDialog(page, Selectors.studio.audioOverviewButton, "Audio overview entry", {
-    customPrompt: opts.customPrompt,
-  });
-}
-
-async function downloadAudio(page: Page, destDir: string): Promise<DownloadAudioResult> {
-  return downloadViaSingleMenuItem(
-    page,
-    Selectors.studio.audioMoreMenuButton,
-    Selectors.studio.singleDownloadMenuItem,
-    destDir,
-    "notebooklm-audio.wav"
-  );
-}
-
 // Kind ("file") is NOT declared here: the engine derives it from
 // FILE_KIND_TYPES/STRUCTURED_KIND_TYPES via `studioKindOf`, so the two
 // cannot drift apart (they previously could, and did — `report` was
@@ -196,24 +142,28 @@ registerStudioStrategy("audio", {
   // broad pre-Task-6 entries had to be REMOVED rather than merely ordered
   // last (`readySelectors` is consumed as an unordered CSS OR).
   readySelectors: Selectors.studio.audioPlayer,
-  trigger: triggerAudio,
-  download: downloadAudio,
+  trigger: dialogTrigger(Selectors.studio.audioOverviewButton, "Audio overview entry"),
+  download: singleMenuItemDownload(
+    Selectors.studio.audioMoreMenuButton,
+    Selectors.studio.singleDownloadMenuItem,
+    "notebooklm-audio.wav"
+  ),
 });
 
 export async function generateAudioOverview(
   page: Page,
-  options: GenerateAudioOptions = {}
-): Promise<AudioGenerationResult> {
+  options: StudioGenerateOptions = {}
+): Promise<StudioGenerationResult> {
   return generateStudioOutput(page, "audio", options);
 }
 
-export async function getAudioStatusOnPage(page: Page): Promise<AudioGenerationResult> {
+export async function getAudioStatusOnPage(page: Page): Promise<StudioGenerationResult> {
   return getStudioOutputStatus(page, "audio");
 }
 
 export async function downloadAudioOverview(
   page: Page,
   destinationDir: string
-): Promise<DownloadAudioResult> {
+): Promise<StudioDownloadResult> {
   return downloadStudioOutput(page, "audio", destinationDir);
 }

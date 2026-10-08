@@ -5,8 +5,7 @@
  * Executed when the server is run with 'config' arguments.
  */
 
-import type { ProfileName } from "./settings-manager.js";
-import { SettingsManager } from "./settings-manager.js";
+import { SettingsManager, isProfileName } from "./settings-manager.js";
 
 export class CliHandler {
   private settingsManager: SettingsManager;
@@ -52,10 +51,10 @@ export class CliHandler {
     }
 
     if (key === "profile") {
-      if (!["minimal", "standard", "full"].includes(value)) {
+      if (!isProfileName(value)) {
         throw new Error("Invalid profile. Allowed: minimal, standard, full");
       }
-      await this.settingsManager.saveSettings({ profile: value as ProfileName });
+      await this.settingsManager.saveSettings({ profile: value });
       console.log(`✅ Profile set to: ${value}`);
     } else if (key === "disabled-tools") {
       const tools = value

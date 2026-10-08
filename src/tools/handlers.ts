@@ -5,6 +5,7 @@
  */
 
 import type { SessionManager } from "../session/session-manager.js";
+import type { BrowserSession } from "../session/browser-session.js";
 import type { AuthManager } from "../auth/auth-manager.js";
 import type { NotebookLibrary } from "../library/notebook-library.js";
 import type {
@@ -15,9 +16,14 @@ import type {
 } from "../library/types.js";
 import type { AddSourceResult } from "../notebooklm/sources.js";
 import { discoverNotebooks, type DiscoveredNotebook } from "../notebooklm/discovery.js";
-import type { AudioGenerationResult, DownloadAudioResult } from "../notebooklm/audio.js";
-import type { StudioOutputType } from "../notebooklm/studio-outputs.js";
-import { isStudioTypeImplemented, implementedStudioTypes } from "../notebooklm/studio-outputs.js";
+import {
+  isStudioTypeImplemented,
+  studioTypeNotImplementedMessage,
+  type StudioContentResult,
+  type StudioDownloadResult,
+  type StudioGenerationResult,
+  type StudioOutputType,
+} from "../notebooklm/studio-outputs.js";
 import {
   acceptedContent,
   inputRequired,
@@ -25,10 +31,9 @@ import {
   type InputRequiredResult,
 } from "@modelcontextprotocol/server";
 import { CONFIG, applyBrowserOptions, type BrowserOptions } from "../config.js";
-import type { ConfirmContext } from "../index.js";
 import { log } from "../utils/logger.js";
-import type { AskQuestionResult, ToolResult, ProgressCallback } from "../types.js";
-import { RateLimitError } from "../errors.js";
+import type { AskQuestionResult, ConfirmContext, ToolResult, ProgressCallback } from "../types.js";
+import { RateLimitError, errorMessage } from "../errors.js";
 import { CleanupManager } from "../utils/cleanup-manager.js";
 import { applyAiMarker, PROVENANCE } from "../utils/disclaimer.js";
 
@@ -47,6 +52,48 @@ function followUpReminderEnabled(): boolean {
   const lower = raw.trim().toLowerCase();
   return lower === "true" || lower === "1" || lower === "yes";
 }
+
+/**
+ * The failure result every handler returns for an unexpected error, logged
+ * with the tool's name.
+ */
+function toolFailure(tool: string, error: unknown): { success: false; error: string } {
+  const message = errorMessage(error);
+  log.error(`❌ [TOOL] ${tool} failed: ${message}`);
+  return { success: false, error: message };
+}
+
+/** Result of setup_auth and re_auth. */
+interface AuthSetupResult {
+  status: string;
+  message: string;
+  authenticated: boolean;
+  duration_seconds?: number;
+}
+
+/** Notebook targeting accepted by every browser-touching tool. */
+interface NotebookTarget {
+  session_id?: string;
+  notebook_id?: string;
+  notebook_url?: string;
+  show_browser?: boolean;
+}
+
+/**
+ * Success rules for {@link ToolHandlers.withNotebookSession}. They differ per
+ * tool on purpose and must not be merged.
+ */
+const generationAccepted = (r: StudioGenerationResult): boolean =>
+  // `started` and `in_progress` count as success: the generation is on its
+  // way and the caller polls the status tool for completion.
+  r.status === "ready" || r.status === "started" || r.status === "in_progress";
+/**
+ * A probe that itself failed is not a successful probe: returning success
+ * here hid engine errors (a missing Studio panel, a stale viewer) behind what
+ * looked like a clean "not_started" answer.
+ */
+const probeSucceeded = (r: StudioGenerationResult): boolean => r.status !== "error";
+const reportedSuccess = (r: { success: boolean }): boolean => r.success;
 
 /**
  * Per-call browser options are applied by mutating the process-global CONFIG,
@@ -106,11 +153,7 @@ export class ToolHandlers {
   private authManager: AuthManager;
   private library: NotebookLibrary;
 
-  constructor(
-    sessionManager: SessionManager,
-    authManager: AuthManager,
-    library: NotebookLibrary
-  ) {
+  constructor(sessionManager: SessionManager, authManager: AuthManager, library: NotebookLibrary) {
     this.sessionManager = sessionManager;
     this.authManager = authManager;
     this.library = library;
@@ -286,10 +329,10 @@ export class ToolHandlers {
         endConfigOverride(configToken);
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
 
       // Special handling for rate limit errors
-      if (error instanceof RateLimitError || errorMessage.toLowerCase().includes("rate limit")) {
+      if (error instanceof RateLimitError || message.toLowerCase().includes("rate limit")) {
         log.error(`🚫 [TOOL] Rate limit detected`);
         return {
           success: false,
@@ -299,15 +342,11 @@ export class ToolHandlers {
             "1. Use the 're_auth' tool to login with a different Google account\n" +
             "2. Wait until tomorrow for the quota to reset\n" +
             "3. Upgrade to Google AI Pro/Ultra for 5x higher limits\n\n" +
-            `Original error: ${errorMessage}`,
+            `Original error: ${message}`,
         };
       }
 
-      log.error(`❌ [TOOL] ask_question failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("ask_question", error);
     }
   }
 
@@ -361,12 +400,7 @@ export class ToolHandlers {
         data: result,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] list_sessions failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("list_sessions", error);
     }
   }
 
@@ -402,12 +436,7 @@ export class ToolHandlers {
         };
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] close_session failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("close_session", error);
     }
   }
 
@@ -445,12 +474,7 @@ export class ToolHandlers {
         },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] reset_session failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("reset_session", error);
     }
   }
 
@@ -518,12 +542,7 @@ export class ToolHandlers {
         data: result,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] get_health failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("get_health", error);
     }
   }
 
@@ -534,91 +553,33 @@ export class ToolHandlers {
    * The operation waits synchronously for login completion (up to 10 minutes).
    */
   async handleSetupAuth(
-    args: {
-      show_browser?: boolean;
-      browser_options?: BrowserOptions;
-    },
+    args: { show_browser?: boolean; browser_options?: BrowserOptions },
     sendProgress?: ProgressCallback
-  ): Promise<
-    ToolResult<{
-      status: string;
-      message: string;
-      authenticated: boolean;
-      duration_seconds?: number;
-    }>
-  > {
-    const { show_browser, browser_options } = args;
+  ): Promise<ToolResult<AuthSetupResult>> {
+    return this.runAuthSetup(args, sendProgress, {
+      tool: "setup_auth",
+      // CRITICAL: Send immediate progress to reset timeout from the very start
+      startProgress: ["Initializing authentication setup...", 0, 10],
+      before: async () => {
+        await sendProgress?.("Preparing authentication browser...", 1, 10);
+        log.info(`  🌐 Opening browser for interactive login...`);
+        await sendProgress?.("Opening browser window...", 2, 10);
 
-    // CRITICAL: Send immediate progress to reset timeout from the very start
-    await sendProgress?.("Initializing authentication setup...", 0, 10);
-
-    log.info(`🔧 [TOOL] setup_auth called`);
-    if (show_browser !== undefined) {
-      log.info(`  Show browser: ${show_browser}`);
-    }
-
-    const startTime = Date.now();
-
-    // Apply browser options temporarily
-    const configToken = beginConfigOverride(applyBrowserOptions(browser_options, show_browser));
-
-    try {
-      // Progress: Starting
-      await sendProgress?.("Preparing authentication browser...", 1, 10);
-
-      log.info(`  🌐 Opening browser for interactive login...`);
-
-      // Progress: Opening browser
-      await sendProgress?.("Opening browser window...", 2, 10);
-
-      // Close live sessions FIRST. `performSetup` deletes and relaunches the
-      // Chrome profile; doing that under a running shared context left the old
-      // browser holding a deleted profile directory — sessions that survived
-      // the wipe then failed in confusing ways and could keep a Chrome process
-      // alive against a profile that no longer exists.
-      if (this.sessionManager.getAllSessionsInfo().length > 0) {
-        log.warning("  🧹 Closing live sessions before re-authenticating...");
+        // Close live sessions AND the shared context FIRST. `performSetup`
+        // deletes and relaunches the Chrome profile; doing that under a running
+        // shared context left the old browser holding a deleted profile
+        // directory. This runs even with no sessions: discover_notebooks opens
+        // the shared context without creating a session, so "no sessions" does
+        // not mean "no Chrome".
+        log.warning(
+          "  🧹 Closing live sessions and the shared browser before re-authenticating..."
+        );
         await this.sessionManager.closeAllSessions();
-      }
-
-      // Perform setup with progress updates (uses CONFIG internally)
-      const success = await this.authManager.performSetup(sendProgress);
-
-      const durationSeconds = (Date.now() - startTime) / 1000;
-
-      if (success) {
-        // Progress: Complete
-        await sendProgress?.("Authentication saved successfully!", 10, 10);
-
-        log.success(`✅ [TOOL] setup_auth completed (${durationSeconds.toFixed(1)}s)`);
-        return {
-          success: true,
-          data: {
-            status: "authenticated",
-            message: "Successfully authenticated and saved browser state",
-            authenticated: true,
-            duration_seconds: durationSeconds,
-          },
-        };
-      } else {
-        log.error(`❌ [TOOL] setup_auth failed (${durationSeconds.toFixed(1)}s)`);
-        return {
-          success: false,
-          error: "Authentication failed or was cancelled",
-        };
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const durationSeconds = (Date.now() - startTime) / 1000;
-      log.error(`❌ [TOOL] setup_auth failed: ${errorMessage} (${durationSeconds.toFixed(1)}s)`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
-    } finally {
-      // Restore original CONFIG
-      endConfigOverride(configToken);
-    }
+      },
+      doneProgress: ["Authentication saved successfully!", 10, 10],
+      successMessage: "Successfully authenticated and saved browser state",
+      failureError: "Authentication failed or was cancelled",
+    });
   }
 
   /**
@@ -632,23 +593,57 @@ export class ToolHandlers {
    * Use for switching Google accounts or recovering from rate limits.
    */
   async handleReAuth(
-    args: {
-      show_browser?: boolean;
-      browser_options?: BrowserOptions;
-    },
+    args: { show_browser?: boolean; browser_options?: BrowserOptions },
     sendProgress?: ProgressCallback
-  ): Promise<
-    ToolResult<{
-      status: string;
-      message: string;
-      authenticated: boolean;
-      duration_seconds?: number;
-    }>
-  > {
+  ): Promise<ToolResult<AuthSetupResult>> {
+    return this.runAuthSetup(args, sendProgress, {
+      tool: "re_auth",
+      startProgress: ["Preparing re-authentication...", 0, 12],
+      before: async () => {
+        // 1. Close all active sessions
+        await sendProgress?.("Closing all active sessions...", 1, 12);
+        log.info("  🛑 Closing all sessions...");
+        await this.sessionManager.closeAllSessions();
+        log.success("  ✅ All sessions closed");
+
+        // 2. Clear all auth data
+        await sendProgress?.("Clearing authentication data...", 2, 12);
+        log.info("  🗑️  Clearing all auth data...");
+        await this.authManager.clearAllAuthData();
+        log.success("  ✅ Auth data cleared");
+
+        // 3. Perform fresh setup
+        await sendProgress?.("Starting fresh authentication...", 3, 12);
+        log.info("  🌐 Starting fresh authentication setup...");
+      },
+      doneProgress: ["Re-authentication complete!", 12, 12],
+      successMessage:
+        "Successfully re-authenticated with new account. All previous sessions have been closed.",
+      failureError: "Re-authentication failed or was cancelled",
+    });
+  }
+
+  /**
+   * Shared body of setup_auth and re_auth: apply the per-call browser options,
+   * run the tool's own preparation steps, run the interactive login, and time
+   * it. The two tools differ only in the steps and wording passed in `flow`.
+   */
+  private async runAuthSetup(
+    args: { show_browser?: boolean; browser_options?: BrowserOptions },
+    sendProgress: ProgressCallback | undefined,
+    flow: {
+      tool: string;
+      startProgress: [string, number, number];
+      before: () => Promise<void>;
+      doneProgress: [string, number, number];
+      successMessage: string;
+      failureError: string;
+    }
+  ): Promise<ToolResult<AuthSetupResult>> {
     const { show_browser, browser_options } = args;
 
-    await sendProgress?.("Preparing re-authentication...", 0, 12);
-    log.info(`🔧 [TOOL] re_auth called`);
+    await sendProgress?.(...flow.startProgress);
+    log.info(`🔧 [TOOL] ${flow.tool} called`);
     if (show_browser !== undefined) {
       log.info(`  Show browser: ${show_browser}`);
     }
@@ -659,53 +654,33 @@ export class ToolHandlers {
     const configToken = beginConfigOverride(applyBrowserOptions(browser_options, show_browser));
 
     try {
-      // 1. Close all active sessions
-      await sendProgress?.("Closing all active sessions...", 1, 12);
-      log.info("  🛑 Closing all sessions...");
-      await this.sessionManager.closeAllSessions();
-      log.success("  ✅ All sessions closed");
+      await flow.before();
 
-      // 2. Clear all auth data
-      await sendProgress?.("Clearing authentication data...", 2, 12);
-      log.info("  🗑️  Clearing all auth data...");
-      await this.authManager.clearAllAuthData();
-      log.success("  ✅ Auth data cleared");
-
-      // 3. Perform fresh setup
-      await sendProgress?.("Starting fresh authentication...", 3, 12);
-      log.info("  🌐 Starting fresh authentication setup...");
+      // Perform setup with progress updates (uses CONFIG internally)
       const success = await this.authManager.performSetup(sendProgress);
 
       const durationSeconds = (Date.now() - startTime) / 1000;
 
       if (success) {
-        await sendProgress?.("Re-authentication complete!", 12, 12);
-        log.success(`✅ [TOOL] re_auth completed (${durationSeconds.toFixed(1)}s)`);
+        await sendProgress?.(...flow.doneProgress);
+        log.success(`✅ [TOOL] ${flow.tool} completed (${durationSeconds.toFixed(1)}s)`);
         return {
           success: true,
           data: {
             status: "authenticated",
-            message:
-              "Successfully re-authenticated with new account. All previous sessions have been closed.",
+            message: flow.successMessage,
             authenticated: true,
             duration_seconds: durationSeconds,
           },
         };
-      } else {
-        log.error(`❌ [TOOL] re_auth failed (${durationSeconds.toFixed(1)}s)`);
-        return {
-          success: false,
-          error: "Re-authentication failed or was cancelled",
-        };
       }
+      log.error(`❌ [TOOL] ${flow.tool} failed (${durationSeconds.toFixed(1)}s)`);
+      return { success: false, error: flow.failureError };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       const durationSeconds = (Date.now() - startTime) / 1000;
-      log.error(`❌ [TOOL] re_auth failed: ${errorMessage} (${durationSeconds.toFixed(1)}s)`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      log.error(`❌ [TOOL] ${flow.tool} failed: ${message} (${durationSeconds.toFixed(1)}s)`);
+      return { success: false, error: message };
     } finally {
       // Restore original CONFIG
       endConfigOverride(configToken);
@@ -729,12 +704,7 @@ export class ToolHandlers {
         data: { notebook },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] add_notebook failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("add_notebook", error);
     }
   }
 
@@ -769,12 +739,7 @@ export class ToolHandlers {
         data: { discovered, added, skipped_existing, ...(note && { note }) },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] discover_notebooks failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("discover_notebooks", error);
     }
   }
 
@@ -792,12 +757,7 @@ export class ToolHandlers {
         data: { notebooks },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] list_notebooks failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("list_notebooks", error);
     }
   }
 
@@ -824,12 +784,7 @@ export class ToolHandlers {
         data: { notebook },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] get_notebook failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("get_notebook", error);
     }
   }
 
@@ -850,12 +805,7 @@ export class ToolHandlers {
         data: { notebook },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] select_notebook failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("select_notebook", error);
     }
   }
 
@@ -876,12 +826,7 @@ export class ToolHandlers {
         data: { notebook },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] update_notebook failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("update_notebook", error);
     }
   }
 
@@ -964,12 +909,7 @@ export class ToolHandlers {
         };
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] remove_notebook failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("remove_notebook", error);
     }
   }
 
@@ -990,12 +930,7 @@ export class ToolHandlers {
         data: { notebooks },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] search_notebooks failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("search_notebooks", error);
     }
   }
 
@@ -1013,12 +948,7 @@ export class ToolHandlers {
         data: stats,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] get_library_stats failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("get_library_stats", error);
     }
   }
 
@@ -1031,27 +961,27 @@ export class ToolHandlers {
     args: { confirm: boolean; preserve_library?: boolean },
     confirmCtx?: ConfirmContext
   ): Promise<
-    ToolResult<{
-      status: string;
-      mode: string;
-      preview?: {
-        categories: Array<{
-          name: string;
-          description: string;
-          paths: string[];
-          totalBytes: number;
-          optional: boolean;
-        }>;
-        totalPaths: number;
-        totalSizeBytes: number;
-      };
-      result?: {
-        deletedPaths: string[];
-        failedPaths: string[];
-        totalSizeBytes: number;
-        categorySummary: Record<string, { count: number; bytes: number }>;
-      };
-    }>
+    | ToolResult<{
+        status: string;
+        mode: string;
+        preview?: {
+          categories: Array<{
+            name: string;
+            description: string;
+            paths: string[];
+            totalBytes: number;
+            optional: boolean;
+          }>;
+          totalPaths: number;
+          totalSizeBytes: number;
+        };
+        result?: {
+          deletedPaths: string[];
+          failedPaths: string[];
+          totalSizeBytes: number;
+          categorySummary: Record<string, { count: number; bytes: number }>;
+        };
+      }>
     | InputRequiredResult
   > {
     const { confirm, preserve_library = false } = args;
@@ -1205,18 +1135,15 @@ export class ToolHandlers {
         };
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] cleanup_data failed: ${errorMessage}`);
-      return {
-        success: false,
-        error: errorMessage,
-      };
+      return toolFailure("cleanup_data", error);
     }
   }
 
   /**
-   * Resolve a notebook URL the same way `handleAskQuestion` does. Used by the
-   * new source/audio tools so we don't duplicate the lookup logic.
+   * Resolve which notebook a browser-touching tool targets: an explicit
+   * `notebook_url`, else a library `notebook_id`, else the live session's own
+   * notebook, else the library's active notebook. `handleAskQuestion` applies
+   * the same precedence inline, because it also bumps the notebook's use count.
    */
   private async resolveNotebookUrl(
     notebookId?: string,
@@ -1248,413 +1175,229 @@ export class ToolHandlers {
   }
 
   /**
-   * Build the same "not yet implemented (Phase 2)" message `getStrategy()`
-   * throws inside `studio-outputs.ts`, so the four Studio-output handlers can
-   * surface it up front — before `resolveNotebookUrl`/`getOrCreateSession`
-   * launch a browser — instead of only reaching it deep inside a live
-   * session (where an unauthenticated/no-notebook caller would instead see
-   * "Notebook URL is required to create a session" for every type,
-   * implemented or not).
+   * Shared skeleton of every browser-touching tool that targets a notebook
+   * (add_source, the three audio tools, the four Studio tools): apply the
+   * per-call `show_browser` override, resolve the notebook, get or create the
+   * session, run `work` with the session marked busy, and return the session
+   * id it used so the caller can reuse or close it. `isOk` decides `success`
+   * from the page-level result, because the rule differs per tool.
    */
-  private studioTypeNotImplementedError(type: StudioOutputType): string {
-    return (
-      `Studio output type "${type}" is not yet implemented by this server (Phase 2). ` +
-      `Implemented types: ${implementedStudioTypes().join(", ")}.`
+  private async withNotebookSession<R>(
+    tool: string,
+    target: NotebookTarget,
+    work: (session: BrowserSession) => Promise<R>,
+    isOk: (result: R) => boolean
+  ): Promise<ToolResult<{ result: R; session_id: string }>> {
+    const configToken = beginConfigOverride(
+      target.show_browser === undefined
+        ? undefined
+        : applyBrowserOptions(undefined, target.show_browser)
     );
+    try {
+      const url = await this.resolveNotebookUrl(
+        target.notebook_id,
+        target.notebook_url,
+        target.session_id
+      );
+      const session = await this.sessionManager.getOrCreateSession(
+        target.session_id,
+        url,
+        target.show_browser
+      );
+      const result = await this.sessionManager.withSessionBusy(session, () => work(session));
+      if (isOk(result)) {
+        return { success: true, data: { result, session_id: session.sessionId } };
+      }
+      // Same top-level `error` every other failure carries; the full engine
+      // result stays in `data.result`.
+      const message = (result as { message?: unknown }).message;
+      return {
+        success: false,
+        error:
+          typeof message === "string" && message.length > 0
+            ? message
+            : `${tool} did not succeed — see data.result for details.`,
+        data: { result, session_id: session.sessionId },
+      };
+    } catch (error) {
+      return toolFailure(tool, error);
+    } finally {
+      endConfigOverride(configToken);
+    }
+  }
+
+  /**
+   * Reject an unimplemented Studio `output_type` before any browser work, so
+   * the caller sees the real reason instead of a session error (an
+   * unauthenticated or notebook-less call would otherwise fail on "Notebook URL
+   * is required" for every type, implemented or not). Returns null when the
+   * type is implemented.
+   */
+  private rejectUnimplementedStudioType(
+    tool: string,
+    type: StudioOutputType
+  ): { success: false; error: string } | null {
+    if (isStudioTypeImplemented(type)) return null;
+    const error = studioTypeNotImplementedMessage(type);
+    log.error(`❌ [TOOL] ${tool} failed: ${error}`);
+    return { success: false, error };
   }
 
   /**
    * Handle add_source tool (issue #25).
    */
-  async handleAddSource(args: {
-    type: "url" | "text";
-    content: string;
-    title?: string;
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AddSourceResult; session_id: string }>> {
+  async handleAddSource(
+    args: NotebookTarget & { type: "url" | "text"; content: string; title?: string }
+  ): Promise<ToolResult<{ result: AddSourceResult; session_id: string }>> {
     log.info(`🔧 [TOOL] add_source called (type=${args.type})`);
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
+    return this.withNotebookSession(
+      "add_source",
+      args,
+      (session) => session.addSource({ type: args.type, content: args.content, title: args.title }),
+      reportedSuccess
     );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
-        session.addSource({
-          type: args.type,
-          content: args.content,
-          title: args.title,
-        })
-      );
-      return { success: result.success, data: { result, session_id: session.sessionId } };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] add_source failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
   }
 
   /**
    * Handle generate_audio tool (issue #11).
    */
-  async handleGenerateAudio(args: {
-    custom_prompt?: string;
-    timeout_ms?: number;
-    wait_for_completion?: boolean;
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
+  async handleGenerateAudio(
+    args: NotebookTarget & {
+      custom_prompt?: string;
+      timeout_ms?: number;
+      wait_for_completion?: boolean;
+    }
+  ): Promise<ToolResult<{ result: StudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] generate_audio called`);
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
-    );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
+    return this.withNotebookSession(
+      "generate_audio",
+      args,
+      (session) =>
         session.generateAudio({
           customPrompt: args.custom_prompt,
           timeoutMs: args.timeout_ms,
           waitForCompletion: args.wait_for_completion ?? false,
-        })
-      );
-      // `started` and `in_progress` count as success — the generation is on
-      // its way; the caller polls `get_audio_status` for completion.
-      const ok =
-        result.status === "ready" || result.status === "started" || result.status === "in_progress";
-      return { success: ok, data: { result, session_id: session.sessionId } };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] generate_audio failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
+        }),
+      generationAccepted
+    );
   }
 
   /**
    * Handle get_audio_status tool — non-blocking poll for Audio Overview state.
    */
-  async handleGetAudioStatus(args: {
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
+  async handleGetAudioStatus(
+    args: NotebookTarget
+  ): Promise<ToolResult<{ result: StudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] get_audio_status called`);
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
+    return this.withNotebookSession(
+      "get_audio_status",
+      args,
+      (session) => session.getAudioStatus(),
+      probeSucceeded
     );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
-        session.getAudioStatus()
-      );
-      // A probe that itself failed is not a successful probe: returning
-      // success:true here hid engine errors (a missing Studio panel, a stale
-      // viewer) behind what looked like a clean "not_started" answer.
-      return {
-        success: result.status !== "error",
-        data: { result, session_id: session.sessionId },
-      };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] get_audio_status failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
   }
 
   /**
    * Handle download_audio tool (issue #11).
    */
-  async handleDownloadAudio(args: {
-    destination_dir: string;
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<ToolResult<{ result: DownloadAudioResult; session_id: string }>> {
+  async handleDownloadAudio(
+    args: NotebookTarget & { destination_dir: string }
+  ): Promise<ToolResult<{ result: StudioDownloadResult; session_id: string }>> {
     log.info(`🔧 [TOOL] download_audio called`);
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
+    return this.withNotebookSession(
+      "download_audio",
+      args,
+      (session) => session.downloadAudio(args.destination_dir),
+      reportedSuccess
     );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
-        session.downloadAudio(args.destination_dir)
-      );
-      return { success: result.success, data: { result, session_id: session.sessionId } };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] download_audio failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
   }
 
   /**
    * Handle generate_studio_output tool (Task 7) — generic trigger for any
    * registered Studio output type.
    */
-  async handleGenerateStudioOutput(args: {
-    output_type: StudioOutputType;
-    custom_prompt?: string;
-    difficulty?: string;
-    timeout_ms?: number;
-    wait_for_completion?: boolean;
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
+  async handleGenerateStudioOutput(
+    args: NotebookTarget & {
+      output_type: StudioOutputType;
+      custom_prompt?: string;
+      difficulty?: string;
+      timeout_ms?: number;
+      wait_for_completion?: boolean;
+    }
+  ): Promise<ToolResult<{ result: StudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] generate_studio_output called (type=${args.output_type})`);
-    if (!isStudioTypeImplemented(args.output_type)) {
-      const error = this.studioTypeNotImplementedError(args.output_type);
-      log.error(`❌ [TOOL] generate_studio_output failed: ${error}`);
-      return { success: false, error };
-    }
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
+    return (
+      this.rejectUnimplementedStudioType("generate_studio_output", args.output_type) ??
+      this.withNotebookSession(
+        "generate_studio_output",
+        args,
+        (session) =>
+          session.generateStudioOutput(args.output_type, {
+            customPrompt: args.custom_prompt,
+            difficulty: args.difficulty,
+            timeoutMs: args.timeout_ms,
+            waitForCompletion: args.wait_for_completion ?? false,
+          }),
+        generationAccepted
+      )
     );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
-        session.generateStudioOutput(args.output_type, {
-          customPrompt: args.custom_prompt,
-          difficulty: args.difficulty,
-          timeoutMs: args.timeout_ms,
-          waitForCompletion: args.wait_for_completion ?? false,
-        })
-      );
-      const ok =
-        result.status === "ready" || result.status === "started" || result.status === "in_progress";
-      return { success: ok, data: { result, session_id: session.sessionId } };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] generate_studio_output failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
   }
 
   /**
    * Handle get_studio_output_status tool (Task 7) — non-blocking poll for
    * any registered Studio output type.
    */
-  async handleGetStudioOutputStatus(args: {
-    output_type: StudioOutputType;
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<ToolResult<{ result: AudioGenerationResult; session_id: string }>> {
+  async handleGetStudioOutputStatus(
+    args: NotebookTarget & { output_type: StudioOutputType }
+  ): Promise<ToolResult<{ result: StudioGenerationResult; session_id: string }>> {
     log.info(`🔧 [TOOL] get_studio_output_status called (type=${args.output_type})`);
-    if (!isStudioTypeImplemented(args.output_type)) {
-      const error = this.studioTypeNotImplementedError(args.output_type);
-      log.error(`❌ [TOOL] get_studio_output_status failed: ${error}`);
-      return { success: false, error };
-    }
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
+    return (
+      this.rejectUnimplementedStudioType("get_studio_output_status", args.output_type) ??
+      this.withNotebookSession(
+        "get_studio_output_status",
+        args,
+        (session) => session.getStudioOutputStatus(args.output_type),
+        probeSucceeded
+      )
     );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
-        session.getStudioOutputStatus(args.output_type)
-      );
-      // Same rule as get_audio_status: an errored probe must not report success.
-      return {
-        success: result.status !== "error",
-        data: { result, session_id: session.sessionId },
-      };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] get_studio_output_status failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
   }
 
   /**
    * Handle download_studio_output tool (Task 7) — save a completed
    * file-kind Studio output to disk.
    */
-  async handleDownloadStudioOutput(args: {
-    output_type: StudioOutputType;
-    destination_dir: string;
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<ToolResult<{ result: DownloadAudioResult; session_id: string }>> {
+  async handleDownloadStudioOutput(
+    args: NotebookTarget & { output_type: StudioOutputType; destination_dir: string }
+  ): Promise<ToolResult<{ result: StudioDownloadResult; session_id: string }>> {
     log.info(`🔧 [TOOL] download_studio_output called (type=${args.output_type})`);
-    if (!isStudioTypeImplemented(args.output_type)) {
-      const error = this.studioTypeNotImplementedError(args.output_type);
-      log.error(`❌ [TOOL] download_studio_output failed: ${error}`);
-      return { success: false, error };
-    }
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
+    return (
+      this.rejectUnimplementedStudioType("download_studio_output", args.output_type) ??
+      this.withNotebookSession(
+        "download_studio_output",
+        args,
+        (session) => session.downloadStudioOutput(args.output_type, args.destination_dir),
+        reportedSuccess
+      )
     );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
-        session.downloadStudioOutput(args.output_type, args.destination_dir)
-      );
-      return { success: result.success, data: { result, session_id: session.sessionId } };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] download_studio_output failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
   }
 
   /**
    * Handle get_studio_output_content tool (Task 7) — extract a completed
    * structured-kind Studio output as JSON.
    */
-  async handleGetStudioOutputContent(args: {
-    output_type: StudioOutputType;
-    session_id?: string;
-    notebook_id?: string;
-    notebook_url?: string;
-    show_browser?: boolean;
-  }): Promise<
-    ToolResult<{
-      result: { success: boolean; content?: unknown; message?: string };
-      session_id: string;
-    }>
-  > {
+  async handleGetStudioOutputContent(
+    args: NotebookTarget & { output_type: StudioOutputType }
+  ): Promise<ToolResult<{ result: StudioContentResult; session_id: string }>> {
     log.info(`🔧 [TOOL] get_studio_output_content called (type=${args.output_type})`);
-    if (!isStudioTypeImplemented(args.output_type)) {
-      const error = this.studioTypeNotImplementedError(args.output_type);
-      log.error(`❌ [TOOL] get_studio_output_content failed: ${error}`);
-      return { success: false, error };
-    }
-    const configToken = beginConfigOverride(
-      args.show_browser === undefined
-        ? undefined
-        : applyBrowserOptions(undefined, args.show_browser)
+    return (
+      this.rejectUnimplementedStudioType("get_studio_output_content", args.output_type) ??
+      this.withNotebookSession(
+        "get_studio_output_content",
+        args,
+        (session) => session.getStudioOutputContent(args.output_type),
+        reportedSuccess
+      )
     );
-    const overrideHeadless = args.show_browser === undefined ? undefined : args.show_browser;
-    try {
-      const url = await this.resolveNotebookUrl(
-        args.notebook_id,
-        args.notebook_url,
-        args.session_id
-      );
-      const session = await this.sessionManager.getOrCreateSession(
-        args.session_id,
-        url,
-        overrideHeadless
-      );
-      const result = await this.sessionManager.withSessionBusy(session, () =>
-        session.getStudioOutputContent(args.output_type)
-      );
-      return { success: result.success, data: { result, session_id: session.sessionId } };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      log.error(`❌ [TOOL] get_studio_output_content failed: ${msg}`);
-      return { success: false, error: msg };
-    } finally {
-      endConfigOverride(configToken);
-    }
   }
 
   /**

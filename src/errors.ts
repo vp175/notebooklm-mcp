@@ -25,48 +25,7 @@ export class RateLimitError extends Error {
   }
 }
 
-/**
- * Error thrown when authentication fails
- *
- * This error can suggest cleanup workflow for persistent issues.
- * Especially useful when upgrading from old installation (notebooklm-mcp-nodejs).
- */
-export class AuthenticationError extends Error {
-  suggestCleanup: boolean;
-
-  constructor(message: string, suggestCleanup: boolean = false) {
-    super(message);
-    this.name = "AuthenticationError";
-    this.suggestCleanup = suggestCleanup;
-
-    // Maintain proper stack trace for where error was thrown (V8 only)
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, AuthenticationError);
-    }
-  }
-}
-
-/**
- * Error thrown by the `elicit` callback (wired in index.ts) specifically when
- * the client HAS declared the `elicitation` capability but the underlying
- * `server.elicitInput()` request itself failed — rejected, errored, or (most
- * commonly) timed out waiting for a human to answer the confirmation dialog.
- *
- * This is distinct from the "capability not declared" case, which the
- * callback signals by resolving to `undefined` rather than throwing. Callers
- * that need fail-closed behavior on a failed confirmation (e.g.
- * `remove_notebook`, a destructive tool) should catch this specific error
- * type and refuse to proceed, rather than treating it the same as "elicitation
- * unavailable, proceed as before".
- */
-export class ElicitationRequestError extends Error {
-  constructor(message: string = "Elicitation request failed") {
-    super(message);
-    this.name = "ElicitationRequestError";
-
-    // Maintain proper stack trace for where error was thrown (V8 only)
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, ElicitationRequestError);
-    }
-  }
+/** The message of any thrown value: `Error.message`, or its string form. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

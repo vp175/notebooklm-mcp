@@ -37,9 +37,6 @@ import {
   generateAudioOverview as generateAudioOnPage,
   downloadAudioOverview as downloadAudioOnPage,
   getAudioStatusOnPage,
-  type GenerateAudioOptions,
-  type AudioGenerationResult,
-  type DownloadAudioResult,
 } from "../notebooklm/audio.js";
 // Side-effect imports: each registers its Studio-output strategy into the
 // shared engine (studio-outputs.ts) on load. No named exports needed here —
@@ -58,6 +55,10 @@ import {
   downloadStudioOutput,
   getStudioOutputContent,
   type StudioOutputType,
+  type StudioGenerateOptions,
+  type StudioGenerationResult,
+  type StudioDownloadResult,
+  type StudioContentResult,
 } from "../notebooklm/studio-outputs.js";
 import { CONFIG } from "../config.js";
 import { log } from "../utils/logger.js";
@@ -222,6 +223,16 @@ export class BrowserSession {
         );
       }
     }
+  }
+
+  /** True when the page is missing, closed, or was never initialised. */
+  private needsInit(): boolean {
+    return !this.initialized || !this.page || this.isPageClosedSafe();
+  }
+
+  /** Initialise (or re-initialise) the page when {@link needsInit} says so. */
+  private async ensureInitialized(): Promise<void> {
+    if (this.needsInit()) await this.init();
   }
 
   private isPageClosedSafe(): boolean {
@@ -416,7 +427,7 @@ export class BrowserSession {
    */
   async ask(question: string, sendProgress?: ProgressCallback): Promise<string> {
     const askOnce = async (): Promise<string> => {
-      if (!this.initialized || !this.page || this.isPageClosedSafe()) {
+      if (this.needsInit()) {
         log.warning(`  ℹ️  Session not initialized or page missing → re-initializing...`);
         await this.init();
       }
@@ -521,39 +532,31 @@ export class BrowserSession {
    * without first running `ask()`.
    */
   async addSource(input: AddSourceInput): Promise<AddSourceResult> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) {
-      await this.init();
-    }
+    await this.ensureInitialized();
     return await addSourceToPage(this.page!, input);
   }
 
   /**
    * Generate an Audio Overview for the active notebook (issue #11).
    */
-  async generateAudio(options: GenerateAudioOptions = {}): Promise<AudioGenerationResult> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) {
-      await this.init();
-    }
+  async generateAudio(options: StudioGenerateOptions = {}): Promise<StudioGenerationResult> {
+    await this.ensureInitialized();
     return this.withRecovery("generateAudio", () => generateAudioOnPage(this.page!, options));
   }
 
   /**
    * Non-blocking probe for the current Audio Overview state (issue #11).
    */
-  async getAudioStatus(): Promise<AudioGenerationResult> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) {
-      await this.init();
-    }
+  async getAudioStatus(): Promise<StudioGenerationResult> {
+    await this.ensureInitialized();
     return this.withRecovery("getAudioStatus", () => getAudioStatusOnPage(this.page!));
   }
 
   /**
    * Download the most recent Audio Overview (issue #11).
    */
-  async downloadAudio(destinationDir: string): Promise<DownloadAudioResult> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) {
-      await this.init();
-    }
+  async downloadAudio(destinationDir: string): Promise<StudioDownloadResult> {
+    await this.ensureInitialized();
     return this.withRecovery("downloadAudio", () =>
       downloadAudioOnPage(this.page!, destinationDir)
     );
@@ -561,15 +564,13 @@ export class BrowserSession {
 
   /**
    * Trigger generation of any registered Studio output type (Task 7). Thin
-   * pass-through onto the generic engine, mirroring the `generateAudio`
-   * pattern above but routed through `withRecovery` since this is new code
-   * added after `withRecovery` was extracted (Task 4).
+   * pass-through onto the generic engine, same shape as `generateAudio`.
    */
   async generateStudioOutput(
     type: StudioOutputType,
-    options: GenerateAudioOptions & { difficulty?: string } = {}
-  ): Promise<AudioGenerationResult> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+    options: StudioGenerateOptions & { difficulty?: string } = {}
+  ): Promise<StudioGenerationResult> {
+    await this.ensureInitialized();
     return this.withRecovery("generateStudioOutput", () =>
       generateStudioOutput(this.page!, type, options)
     );
@@ -578,8 +579,8 @@ export class BrowserSession {
   /**
    * Non-blocking probe for any registered Studio output type (Task 7).
    */
-  async getStudioOutputStatus(type: StudioOutputType): Promise<AudioGenerationResult> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+  async getStudioOutputStatus(type: StudioOutputType): Promise<StudioGenerationResult> {
+    await this.ensureInitialized();
     return this.withRecovery("getStudioOutputStatus", () =>
       getStudioOutputStatus(this.page!, type)
     );
@@ -591,8 +592,8 @@ export class BrowserSession {
   async downloadStudioOutput(
     type: StudioOutputType,
     destinationDir: string
-  ): Promise<DownloadAudioResult> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+  ): Promise<StudioDownloadResult> {
+    await this.ensureInitialized();
     return this.withRecovery("downloadStudioOutput", () =>
       downloadStudioOutput(this.page!, type, destinationDir)
     );
@@ -601,10 +602,8 @@ export class BrowserSession {
   /**
    * Extract a completed structured-kind Studio output as JSON (Task 7).
    */
-  async getStudioOutputContent(
-    type: StudioOutputType
-  ): Promise<{ success: boolean; content?: unknown; message?: string }> {
-    if (!this.initialized || !this.page || this.isPageClosedSafe()) await this.init();
+  async getStudioOutputContent(type: StudioOutputType): Promise<StudioContentResult> {
+    await this.ensureInitialized();
     return this.withRecovery("getStudioOutputContent", () =>
       getStudioOutputContent(this.page!, type)
     );
@@ -827,9 +826,7 @@ export class BrowserSession {
    */
   async reset(): Promise<void> {
     const resetOnce = async (): Promise<void> => {
-      if (!this.initialized || !this.page || this.isPageClosedSafe()) {
-        await this.init();
-      }
+      await this.ensureInitialized();
       log.info(`🔄 [${this.sessionId}] Resetting chat history...`);
       // Reload the page to clear chat history
       await (this.page as Page).reload({ waitUntil: "domcontentloaded" });
@@ -897,19 +894,5 @@ export class BrowserSession {
       message_count: this.messageCount,
       notebook_url: this.notebookUrl,
     };
-  }
-
-  /**
-   * Get the underlying page (for advanced operations)
-   */
-  getPage(): Page | null {
-    return this.page;
-  }
-
-  /**
-   * Check if session is initialized
-   */
-  isInitialized(): boolean {
-    return this.initialized && this.page !== null;
   }
 }

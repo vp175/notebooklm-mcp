@@ -229,7 +229,10 @@ function bannerShaped(text: string): boolean {
 
 /** Strip leading glyphs/quotes so "⚠️ An error occurred" still matches. */
 function bannerBody(text: string): string {
-  return text.trim().toLowerCase().replace(/^[^\p{L}\p{N}]+/u, "");
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/^[^\p{L}\p{N}]+/u, "");
 }
 
 /**
@@ -341,7 +344,6 @@ export async function countAnswerContainers(page: Page): Promise<number> {
   return readAnswerTexts(page).then((t) => t.length);
 }
 
-
 /**
  * Wait for the *latest* answer text to appear and stabilise.
  *
@@ -355,10 +357,7 @@ export async function countAnswerContainers(page: Page): Promise<number> {
  * already special-cases `RateLimitError` and reports the rest as a failure —
  * which is the point: a banner must not be reported as a successful answer.
  */
-export async function waitForStableAnswer(
-  page: Page,
-  options: AskOptions
-): Promise<string | null> {
+export async function waitForStableAnswer(page: Page, options: AskOptions): Promise<string | null> {
   const {
     question = "",
     timeoutMs = 600_000,
@@ -367,7 +366,6 @@ export async function waitForStableAnswer(
     priorAnswerCount,
     stablePolls = 3,
   } = options;
-
 
   const deadline = Date.now() + timeoutMs;
   const echoLower = question.trim().toLowerCase();
@@ -389,7 +387,6 @@ export async function waitForStableAnswer(
   let lastSeen: string | null = null;
   let stableStreak = 0;
   let pollCount = 0;
-
 
   while (Date.now() < deadline && pollCount < maxPolls) {
     pollCount++;
@@ -502,8 +499,6 @@ export async function waitForStableAnswer(
 
   return null;
 }
-
-
 
 /**
  * Strip Material-icon labels (`more_vert`, `more_horiz`, …) and orphaned

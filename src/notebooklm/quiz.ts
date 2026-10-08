@@ -26,24 +26,13 @@ import type { Page, Frame } from "patchright";
 import { Selectors } from "./selectors.js";
 import {
   registerStudioStrategy,
-  triggerViaDialog,
   openStructuredViewer,
   getSandboxFrame,
+  dialogTrigger,
 } from "./studio-outputs.js";
-import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.quizButton;
 const READY_SELECTORS = Selectors.studio.quizTile;
-
-// `opts` must be declared and forwarded: the engine calls
-// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
-// `page` silently discards it — generation then runs over the whole
-// notebook while the tool reports success.
-async function triggerQuiz(page: Page, opts: StudioTriggerOptions): Promise<StudioTriggerOutcome> {
-  return triggerViaDialog(page, TRIGGER_SELECTORS, "Quiz entry", {
-    customPrompt: opts.customPrompt,
-  });
-}
 
 export interface QuizQuestion {
   question: string;
@@ -149,6 +138,6 @@ registerStudioStrategy("quiz", {
   // repeat-call protection comes from its in-flight record instead.
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,
-  trigger: triggerQuiz,
+  trigger: dialogTrigger(TRIGGER_SELECTORS, "Quiz entry"),
   extractContent: extractQuiz,
 });

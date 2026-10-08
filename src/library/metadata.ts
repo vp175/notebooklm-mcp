@@ -15,18 +15,10 @@ export function getTopicsLine(notebook: NotebookEntry): string {
   return joinNonEmpty(notebook.topics, ", ", "general topics");
 }
 
-export function getContentTypesLine(notebook: NotebookEntry): string {
-  return joinNonEmpty(notebook.content_types, ", ", "documentation");
-}
-
 export function getUseCaseBullets(notebook: NotebookEntry, indent: string = "  "): string {
   const useCases = notebook.use_cases?.filter(isNonEmptyString) ?? [];
   const list = useCases.length > 0 ? useCases : FALLBACK_USE_CASES;
   return list.map((uc) => `${indent}- ${uc}`).join("\n");
-}
-
-export function getTagsLine(notebook: NotebookEntry): string {
-  return joinNonEmpty(notebook.tags, ", ", "");
 }
 
 function joinNonEmpty(value: readonly string[] | undefined, sep: string, fallback: string): string {

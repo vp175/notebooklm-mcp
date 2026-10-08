@@ -65,6 +65,35 @@ upstream and contains none of this.
 
 ### Changed
 
+- **Internal refactor (2026-10-08), no change to the tool surface.** The eight
+  browser-touching handlers (`add_source`, the three audio tools, the four
+  Studio tools) share one `withNotebookSession` skeleton instead of eight
+  copies; `setup_auth` and `re_auth` share one `runAuthSetup` body; the
+  `tools/call` dispatch table types every entry through one `dispatchTo`
+  adapter instead of 20 hand-written casts; the eight Studio strategy modules
+  build their trigger and download functions from two engine factories
+  (`dialogTrigger`, `singleMenuItemDownload`); `BrowserSession` has one
+  `ensureInitialized` guard instead of ten inline copies. The shared Studio
+  result types moved from `audio.ts` to `studio-outputs.ts` under neutral
+  names (`StudioGenerationResult`, `StudioDownloadResult`,
+  `StudioGenerateOptions`, `StudioOutputStatus`, plus `StudioContentResult`).
+  Verified by diffing `tools/list`, prompts, resources and 22 browser-free
+  tool calls on both protocol eras before and after: identical for the
+  refactor alone. With the fixes below applied, the only difference is the
+  two `idempotentHint` annotations. `implementedStudioTypes` was replaced by
+  `studioTypeNotImplementedMessage`, the one source of the "not yet
+  implemented" text.
+- **Removed code with no callers**: `ElicitationRequestError`,
+  `AuthenticationError`, `TypingOptions`, `WaitForAnswerOptions`, five
+  unused stealth helpers and the stealth
+  default export, `getContentTypesLine`/`getTagsLine`, four unused
+  `AuthManager` state methods, `BrowserSession.getPage`/`isInitialized`, and
+  `SharedContextManager.getContextInfo`.
+- `download_audio` and `download_studio_output` are annotated
+  `idempotentHint: false`: every repeat call writes another file (a ` (2)`
+  suffix on a name clash), so a host that auto-retries "idempotent" tools
+  would litter the destination directory.
+
 - **Profile filtering applies to `tools/call`, not only `tools/list`.** Tools
   hidden by the active profile or by `disabled-tools` stayed fully callable by
   name, which made the setting cosmetic. Both a hidden and an unknown tool name
@@ -103,6 +132,23 @@ upstream and contains none of this.
   this fork's work.
 
 ### Fixed
+
+- **A tool called with no `arguments` key crashed** with a TypeError on
+  `args` when its handler read an optional argument (`get_audio_status`,
+  `generate_audio`, `setup_auth`, `re_auth`). Omitted
+  arguments now reach the handler as `{}`.
+- **`browser_options.timeout_ms: 0` waited forever.** It was copied straight
+  into the page-navigation timeout, where Playwright reads 0 as "no timeout".
+  Only a positive, finite value is applied now; anything else keeps the
+  default.
+- **`setup_auth` could wipe the Chrome profile under a running browser.** It
+  closed the shared browser context only when sessions existed, but
+  `discover_notebooks` opens that context without creating a session.
+  `setup_auth` now always closes it first, as `re_auth` already did.
+- **Failed browser-touching tools carried no top-level `error`.** The eight
+  session-backed tools returned `success: false` with the detail buried in
+  `data.result`; they now also return `error` (the engine's message), like
+  every other failure.
 
 - **Audio generation actually starts.** The trigger tile always opens a
   "Customize Audio Overview" dialog; the bare click stopped there, so

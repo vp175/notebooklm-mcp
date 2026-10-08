@@ -348,7 +348,13 @@ export function applyBrowserOptions(options?: BrowserOptions, legacyShowBrowser?
     if (options.headless !== undefined) {
       config.headless = options.headless;
     }
-    if (options.timeout_ms !== undefined) {
+    // Only a positive, finite timeout is applied: 0 reaches Playwright as
+    // "no timeout at all", which pinned the session forever.
+    if (
+      typeof options.timeout_ms === "number" &&
+      Number.isFinite(options.timeout_ms) &&
+      options.timeout_ms > 0
+    ) {
       config.browserTimeout = options.timeout_ms;
     }
     if (options.stealth) {

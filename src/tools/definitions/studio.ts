@@ -191,7 +191,7 @@ export const downloadStudioOutputTool: Tool = {
     title: "Download Studio output",
     readOnlyHint: false,
     destructiveHint: false,
-    idempotentHint: true,
+    idempotentHint: false, // each call writes a new file (` (2)` suffix on a clash)
     openWorldHint: true,
   },
 };

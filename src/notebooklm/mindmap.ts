@@ -88,27 +88,13 @@ import type { Page, Frame, Locator } from "patchright";
 import { Selectors } from "./selectors.js";
 import {
   registerStudioStrategy,
-  triggerViaDialog,
   openStructuredViewer,
   getSandboxFrame,
+  dialogTrigger,
 } from "./studio-outputs.js";
-import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.mindmapButton;
 const READY_SELECTORS = Selectors.studio.mindmapTile;
-
-// `opts` must be declared and forwarded: the engine calls
-// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
-// `page` silently discards it — generation then runs over the whole
-// notebook while the tool reports success.
-async function triggerMindMap(
-  page: Page,
-  opts: StudioTriggerOptions
-): Promise<StudioTriggerOutcome> {
-  return triggerViaDialog(page, TRIGGER_SELECTORS, "Mind Map entry", {
-    customPrompt: opts.customPrompt,
-  });
-}
 
 export interface MindMapNode {
   label: string;
@@ -392,6 +378,6 @@ registerStudioStrategy("mindmap", {
   // repeat-call protection comes from its in-flight record instead.
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,
-  trigger: triggerMindMap,
+  trigger: dialogTrigger(TRIGGER_SELECTORS, "Mind Map entry"),
   extractContent: extractMindMap,
 });

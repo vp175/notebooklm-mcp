@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS: Settings = {
   disabledTools: [],
 };
 
-function isProfileName(value: string | undefined): value is ProfileName {
+export function isProfileName(value: string | undefined): value is ProfileName {
   return value === "minimal" || value === "standard" || value === "full";
 }
 

@@ -103,18 +103,6 @@ export class AuthManager {
   }
 
   /**
-   * Check if saved browser state exists
-   */
-  async hasSavedState(): Promise<boolean> {
-    try {
-      await fs.access(this.stateFilePath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
    * Get path to saved browser state
    */
   getStatePath(): string | null {
@@ -161,43 +149,6 @@ export class AuthManager {
   // ============================================================================
   // Cookie Validation
   // ============================================================================
-
-  /**
-   * Validate if saved state is still valid
-   */
-  async validateState(context: BrowserContext): Promise<boolean> {
-    try {
-      const cookies = await context.cookies();
-      if (cookies.length === 0) {
-        log.warning("⚠️  No cookies found in state");
-        return false;
-      }
-
-      // Check for Google auth cookies
-      const googleCookies = cookies.filter((c) => c.domain.includes("google.com"));
-      if (googleCookies.length === 0) {
-        log.warning("⚠️  No Google cookies found");
-        return false;
-      }
-
-      // Check if important cookies are expired
-      const currentTime = Date.now() / 1000;
-
-      for (const cookie of googleCookies) {
-        const expires = cookie.expires ?? -1;
-        if (expires !== -1 && expires < currentTime) {
-          log.warning(`⚠️  Cookie '${cookie.name}' has expired`);
-          return false;
-        }
-      }
-
-      log.success("✅ State validation passed");
-      return true;
-    } catch (error) {
-      log.warning(`⚠️  State validation failed: ${error}`);
-      return false;
-    }
-  }
 
   /**
    * Validate if critical authentication cookies are still valid
@@ -1039,83 +990,6 @@ export class AuthManager {
       log.info("  ℹ️  No old auth data found (already clean)");
     } else {
       log.success(`✅ All auth data cleared (${deletedCount} items) - ready for new account!`);
-    }
-  }
-
-  /**
-   * Clear all saved authentication state
-   */
-  async clearState(): Promise<boolean> {
-    try {
-      try {
-        await fs.unlink(this.stateFilePath);
-      } catch {
-        // File doesn't exist
-      }
-
-      try {
-        await fs.unlink(this.sessionFilePath);
-      } catch {
-        // File doesn't exist
-      }
-
-      log.success("✅ Authentication state cleared");
-      return true;
-    } catch (error) {
-      log.error(`❌ Failed to clear state: ${error}`);
-      return false;
-    }
-  }
-
-  /**
-   * HARD RESET: Completely delete ALL authentication state
-   */
-  async hardResetState(): Promise<boolean> {
-    try {
-      log.warning("🧹 Performing HARD RESET of all authentication state...");
-
-      let deletedCount = 0;
-
-      // Delete state file
-      try {
-        await fs.unlink(this.stateFilePath);
-        log.info(`  🗑️  Deleted: ${this.stateFilePath}`);
-        deletedCount++;
-      } catch {
-        // File doesn't exist
-      }
-
-      // Delete session file
-      try {
-        await fs.unlink(this.sessionFilePath);
-        log.info(`  🗑️  Deleted: ${this.sessionFilePath}`);
-        deletedCount++;
-      } catch {
-        // File doesn't exist
-      }
-
-      // Delete entire browser_state_dir
-      try {
-        const files = await fs.readdir(CONFIG.browserStateDir);
-        for (const file of files) {
-          await fs.unlink(path.join(CONFIG.browserStateDir, file));
-          deletedCount++;
-        }
-        log.info(`  🗑️  Deleted: ${CONFIG.browserStateDir}/ (${files.length} files)`);
-      } catch {
-        // Directory doesn't exist or empty
-      }
-
-      if (deletedCount === 0) {
-        log.info("  ℹ️  No state to delete (already clean)");
-      } else {
-        log.success(`✅ Hard reset complete: ${deletedCount} items deleted`);
-      }
-
-      return true;
-    } catch (error) {
-      log.error(`❌ Hard reset failed: ${error}`);
-      return false;
     }
   }
 }

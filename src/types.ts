@@ -81,25 +81,6 @@ export interface ToolResult<T = unknown> {
 }
 
 /**
- * Options for human-like typing
- */
-export interface TypingOptions {
-  wpm?: number; // Words per minute
-  withTypos?: boolean;
-}
-
-/**
- * Options for waiting for answers
- */
-export interface WaitForAnswerOptions {
-  question?: string;
-  timeoutMs?: number;
-  pollIntervalMs?: number;
-  ignoreTexts?: string[];
-  debug?: boolean;
-}
-
-/**
  * Progress callback function for MCP progress notifications
  */
 export type ProgressCallback = (
@@ -107,3 +88,16 @@ export type ProgressCallback = (
   progress?: number,
   total?: number
 ) => Promise<void>;
+
+/**
+ * A confirmation round-trip, as the tool handlers see it.
+ *
+ * `canElicit` is whether this client can answer a confirmation at all;
+ * `responses` carries the answers a retried call brought back (the
+ * multi-round-trip flow of protocol revision 2026-07-28, which the SDK also
+ * serves to 2025-era clients through its legacy elicitation shim).
+ */
+export interface ConfirmContext {
+  canElicit: boolean;
+  responses?: Record<string, unknown>;
+}

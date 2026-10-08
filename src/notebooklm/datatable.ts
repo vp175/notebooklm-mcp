@@ -26,28 +26,10 @@
 
 import type { Page } from "patchright";
 import { Selectors } from "./selectors.js";
-import {
-  registerStudioStrategy,
-  triggerViaDialog,
-  openStructuredViewer,
-} from "./studio-outputs.js";
-import type { StudioTriggerOptions, StudioTriggerOutcome } from "./studio-outputs.js";
+import { registerStudioStrategy, openStructuredViewer, dialogTrigger } from "./studio-outputs.js";
 
 const TRIGGER_SELECTORS = Selectors.studio.dataTableButton;
 const READY_SELECTORS = Selectors.studio.dataTableTile;
-
-// `opts` must be declared and forwarded: the engine calls
-// `strategy.trigger(page, { customPrompt })`, and a trigger that takes only
-// `page` silently discards it — the Data Table would be generated over the
-// whole notebook while the tool reports success.
-async function triggerDataTable(
-  page: Page,
-  opts: StudioTriggerOptions
-): Promise<StudioTriggerOutcome> {
-  return triggerViaDialog(page, TRIGGER_SELECTORS, "Data Table entry", {
-    customPrompt: opts.customPrompt,
-  });
-}
 
 export interface DataTableContent {
   headers: string[];
@@ -98,6 +80,6 @@ registerStudioStrategy("datatable", {
   // repeat-call protection comes from its in-flight record instead.
   inProgressPhrases: [],
   readySelectors: READY_SELECTORS,
-  trigger: triggerDataTable,
+  trigger: dialogTrigger(TRIGGER_SELECTORS, "Data Table entry"),
   extractContent: extractDataTable,
 });

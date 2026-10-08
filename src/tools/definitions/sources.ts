@@ -231,7 +231,7 @@ export const downloadAudioTool: Tool = {
     title: "Download Audio Overview",
     readOnlyHint: false,
     destructiveHint: false,
-    idempotentHint: true,
+    idempotentHint: false, // each call writes a new file (` (2)` suffix on a clash)
     openWorldHint: true,
   },
 };

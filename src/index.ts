@@ -40,7 +40,7 @@ import {
 import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server/stdio";
 import type { ClientCapabilities, ServerContext, Tool } from "@modelcontextprotocol/server";
 
-import type { ProgressCallback } from "./types.js";
+import type { ConfirmContext, ProgressCallback } from "./types.js";
 import { AuthManager } from "./auth/auth-manager.js";
 import { applyAccountToConfig, getRequestedAccount } from "./auth/account-switcher.js";
 import { SessionManager } from "./session/session-manager.js";
@@ -53,6 +53,7 @@ import { CliHandler } from "./utils/cli-handler.js";
 import { CONFIG, ensureDirectories } from "./config.js";
 import { startHttpTransport } from "./transport/http.js";
 import { log } from "./utils/logger.js";
+import { errorMessage } from "./errors.js";
 
 /**
  * Server-level instructions consumed by MCP clients during initialization.
@@ -226,19 +227,6 @@ function readProgressToken(meta: unknown): string | number | undefined {
   return typeof token === "string" || typeof token === "number" ? token : undefined;
 }
 
-/**
- * A confirmation round-trip, as the tool handlers see it.
- *
- * `canElicit` is whether this client can answer a confirmation at all;
- * `responses` carries the answers a retried call brought back (the
- * multi-round-trip flow of protocol revision 2026-07-28, which the SDK also
- * serves to 2025-era clients through its legacy elicitation shim).
- */
-export interface ConfirmContext {
-  canElicit: boolean;
-  responses?: Record<string, unknown>;
-}
-
 type ToolDispatchEntry = (
   args: Record<string, unknown> | undefined,
   sendProgress: ProgressCallback,
@@ -246,6 +234,20 @@ type ToolDispatchEntry = (
 ) => Promise<unknown>;
 
 type ToolDispatch = Map<string, ToolDispatchEntry>;
+
+/**
+ * Adapt one handler to the dispatch signature. The handler's own declared
+ * argument type is the cast target, so each entry stays typed against its
+ * handler in `handlers.ts`. The cast is safe because `tools/call` validates the
+ * arguments against the tool's inputSchema before dispatching. A call with no
+ * `arguments` key at all (legal for a tool with no required arguments) reaches
+ * the handler as `{}` rather than `undefined`.
+ */
+function dispatchTo<A>(
+  handler: (args: A, sendProgress: ProgressCallback, confirm: ConfirmContext) => Promise<unknown>
+): ToolDispatchEntry {
+  return (args, sendProgress, confirm) => handler((args ?? {}) as A, sendProgress, confirm);
+}
 
 /**
  * Main MCP Server Class
@@ -373,112 +375,48 @@ class NotebookLMMCPServer {
   }
 
   /**
-   * Build the tool-name → handler dispatch table used by the
-   * `CallToolRequestSchema` handler. A direct 1:1 transcription of every
-   * tool case previously handled by a `switch` statement — no new logic.
-   * `Parameters<typeof h.handleX>[0]` derives each handler's argument type
-   * from its own declaration in `handlers.ts`, so it cannot silently drift
-   * out of sync with the handler signatures.
+   * Build the tool-name → handler dispatch table used by the `tools/call`
+   * handler. Every entry goes through {@link dispatchTo}, which types the
+   * arguments against the handler's own signature.
    */
   private buildToolDispatch(handlers: ToolHandlers): ToolDispatch {
     const h = handlers;
     return new Map<string, ToolDispatchEntry>([
-      [
-        "ask_question",
-        (args, sendProgress) =>
-          h.handleAskQuestion(args as Parameters<typeof h.handleAskQuestion>[0], sendProgress),
-      ],
-      [
-        "add_notebook",
-        (args) => h.handleAddNotebook(args as unknown as Parameters<typeof h.handleAddNotebook>[0]),
-      ],
-      ["discover_notebooks", () => h.handleDiscoverNotebooks()],
-      ["list_notebooks", () => h.handleListNotebooks()],
-      [
-        "get_notebook",
-        (args) => h.handleGetNotebook(args as Parameters<typeof h.handleGetNotebook>[0]),
-      ],
-      [
-        "select_notebook",
-        (args) => h.handleSelectNotebook(args as Parameters<typeof h.handleSelectNotebook>[0]),
-      ],
-      [
-        "update_notebook",
-        (args) =>
-          h.handleUpdateNotebook(args as unknown as Parameters<typeof h.handleUpdateNotebook>[0]),
-      ],
+      ["ask_question", dispatchTo(h.handleAskQuestion.bind(h))],
+      ["add_notebook", dispatchTo(h.handleAddNotebook.bind(h))],
+      ["discover_notebooks", dispatchTo(h.handleDiscoverNotebooks.bind(h))],
+      ["list_notebooks", dispatchTo(h.handleListNotebooks.bind(h))],
+      ["get_notebook", dispatchTo(h.handleGetNotebook.bind(h))],
+      ["select_notebook", dispatchTo(h.handleSelectNotebook.bind(h))],
+      ["update_notebook", dispatchTo(h.handleUpdateNotebook.bind(h))],
       [
         "remove_notebook",
-        (args, _sendProgress, confirm) =>
-          h.handleRemoveNotebook(args as Parameters<typeof h.handleRemoveNotebook>[0], confirm),
+        dispatchTo((args: Parameters<typeof h.handleRemoveNotebook>[0], _progress, confirm) =>
+          h.handleRemoveNotebook(args, confirm)
+        ),
       ],
-      [
-        "search_notebooks",
-        (args) => h.handleSearchNotebooks(args as Parameters<typeof h.handleSearchNotebooks>[0]),
-      ],
-      ["get_library_stats", () => h.handleGetLibraryStats()],
-      ["list_sessions", () => h.handleListSessions()],
-      [
-        "close_session",
-        (args) => h.handleCloseSession(args as Parameters<typeof h.handleCloseSession>[0]),
-      ],
-      [
-        "reset_session",
-        (args) => h.handleResetSession(args as Parameters<typeof h.handleResetSession>[0]),
-      ],
-      ["get_health", () => h.handleGetHealth()],
-      [
-        "setup_auth",
-        (args, sendProgress) =>
-          h.handleSetupAuth(args as Parameters<typeof h.handleSetupAuth>[0], sendProgress),
-      ],
-      [
-        "re_auth",
-        (args, sendProgress) =>
-          h.handleReAuth(args as Parameters<typeof h.handleReAuth>[0], sendProgress),
-      ],
+      ["search_notebooks", dispatchTo(h.handleSearchNotebooks.bind(h))],
+      ["get_library_stats", dispatchTo(h.handleGetLibraryStats.bind(h))],
+      ["list_sessions", dispatchTo(h.handleListSessions.bind(h))],
+      ["close_session", dispatchTo(h.handleCloseSession.bind(h))],
+      ["reset_session", dispatchTo(h.handleResetSession.bind(h))],
+      ["get_health", dispatchTo(h.handleGetHealth.bind(h))],
+      ["setup_auth", dispatchTo(h.handleSetupAuth.bind(h))],
+      ["re_auth", dispatchTo(h.handleReAuth.bind(h))],
       [
         "cleanup_data",
-        (args, _sendProgress, confirm) =>
-          h.handleCleanupData(args as Parameters<typeof h.handleCleanupData>[0], confirm),
+        dispatchTo((args: Parameters<typeof h.handleCleanupData>[0], _progress, confirm) =>
+          h.handleCleanupData(args, confirm)
+        ),
       ],
-      ["add_source", (args) => h.handleAddSource(args as Parameters<typeof h.handleAddSource>[0])],
-      [
-        "generate_audio",
-        (args) => h.handleGenerateAudio(args as Parameters<typeof h.handleGenerateAudio>[0]),
-      ],
-      [
-        "get_audio_status",
-        (args) => h.handleGetAudioStatus(args as Parameters<typeof h.handleGetAudioStatus>[0]),
-      ],
-      [
-        "download_audio",
-        (args) => h.handleDownloadAudio(args as Parameters<typeof h.handleDownloadAudio>[0]),
-      ],
-      [
-        "generate_studio_output",
-        (args) =>
-          h.handleGenerateStudioOutput(args as Parameters<typeof h.handleGenerateStudioOutput>[0]),
-      ],
-      [
-        "get_studio_output_status",
-        (args) =>
-          h.handleGetStudioOutputStatus(
-            args as Parameters<typeof h.handleGetStudioOutputStatus>[0]
-          ),
-      ],
-      [
-        "download_studio_output",
-        (args) =>
-          h.handleDownloadStudioOutput(args as Parameters<typeof h.handleDownloadStudioOutput>[0]),
-      ],
-      [
-        "get_studio_output_content",
-        (args) =>
-          h.handleGetStudioOutputContent(
-            args as Parameters<typeof h.handleGetStudioOutputContent>[0]
-          ),
-      ],
+      ["add_source", dispatchTo(h.handleAddSource.bind(h))],
+      ["generate_audio", dispatchTo(h.handleGenerateAudio.bind(h))],
+      ["get_audio_status", dispatchTo(h.handleGetAudioStatus.bind(h))],
+      ["download_audio", dispatchTo(h.handleDownloadAudio.bind(h))],
+      ["generate_studio_output", dispatchTo(h.handleGenerateStudioOutput.bind(h))],
+      ["get_studio_output_status", dispatchTo(h.handleGetStudioOutputStatus.bind(h))],
+      ["download_studio_output", dispatchTo(h.handleDownloadStudioOutput.bind(h))],
+      ["get_studio_output_content", dispatchTo(h.handleGetStudioOutputContent.bind(h))],
     ]);
   }
 
@@ -645,13 +583,13 @@ class NotebookLMMCPServer {
           throw error;
         }
 
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        log.error(`❌ [MCP] Tool execution error: ${errorMessage}`);
+        const message = errorMessage(error);
+        log.error(`❌ [MCP] Tool execution error: ${message}`);
 
         // Same isError rule as above: an exception escaping a handler that
         // declares an outputSchema previously produced a result SDK clients
         // reject outright, hiding the real error message from the model.
-        return failure(errorMessage);
+        return failure(message);
       }
     });
   }
